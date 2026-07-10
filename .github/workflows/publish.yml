@@ -1,0 +1,126 @@
+# Publish a recipe release from a tag of the form <name>-<semver>,
+# e.g. codex-0.1.0: package a deterministic tarball, attach it to a GitHub
+# Release, and regenerate index.yaml on the gh-pages branch.
+# Third-party registries can copy this file (plus scripts/) unchanged.
+name: publish
+
+on:
+  push:
+    tags: ['*-*']
+
+permissions:
+  contents: write
+
+# Index updates must be serialized; releases for different recipes can race
+# otherwise and lose index entries.
+concurrency:
+  group: publish-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if [[ "$TAG" =~ ^([a-z0-9-]+)-([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "name=${BASH_REMATCH[1]}"    >> "$GITHUB_OUTPUT"
+            echo "version=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::tag '$TAG' is not <recipe>-<semver>"
+            exit 1
+          fi
+
+      - name: Install PyYAML
+        run: python3 -m pip install pyyaml
+
+      - name: Check out vaka source
+        uses: actions/checkout@v4
+        with:
+          repository: infrasecture/vaka
+          path: .vaka-src
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .vaka-src/go.mod
+          cache-dependency-path: .vaka-src/go.sum
+
+      - name: Build vaka
+        working-directory: .vaka-src
+        run: go build -o "$RUNNER_TEMP/vaka" ./cmd/vaka
+
+      - name: Validate released recipe
+        env:
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          [ -d "$NAME" ] || { echo "::error::no recipe directory '$NAME' at this tag"; exit 1; }
+          python3 scripts/validate_recipe.py "$NAME" \
+            --expect-version "$VERSION" \
+            --summary-json "$RUNNER_TEMP/policy-summary.json"
+          for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+            if [ -e "$NAME/$f" ]; then
+              (cd "$NAME" && "$RUNNER_TEMP/vaka" validate --compose "$f")
+              break
+            fi
+          done
+
+      - name: Package deterministic tarball
+        id: pkg
+        env:
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              -cf - "$NAME" | gzip -n > "${NAME}-${VERSION}.tar.gz"
+          DIGEST="sha256:$(sha256sum "${NAME}-${VERSION}.tar.gz" | cut -d' ' -f1)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "packaged ${NAME}-${VERSION}.tar.gz ($DIGEST)"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          DIGEST: ${{ steps.pkg.outputs.digest }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" "${NAME}-${VERSION}.tar.gz" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Recipe \`$NAME\` version \`$VERSION\`.
+
+          Tarball digest: \`$DIGEST\`
+
+          Install (once \`vaka get\` ships): \`vaka get $NAME@$VERSION\`"
+
+      - name: Update index on gh-pages
+        env:
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          DIGEST: ${{ steps.pkg.outputs.digest }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${NAME}-${VERSION}.tar.gz"
+          git fetch origin gh-pages
+          git worktree add -B gh-pages pages origin/gh-pages
+          python3 scripts/build_index.py \
+            --index pages/index.yaml \
+            --name "$NAME" --version "$VERSION" \
+            --digest "$DIGEST" --url "$URL" \
+            --recipe-yaml "$NAME/recipe.yaml" \
+            --summary-json "$RUNNER_TEMP/policy-summary.json"
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.yaml
+          git commit -m "index: ${NAME}@${VERSION} (${DIGEST})"
+          git push origin gh-pages

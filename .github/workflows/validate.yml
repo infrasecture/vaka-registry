@@ -1,0 +1,81 @@
+# Validate every recipe on each PR and push to main.
+# Third-party registries can copy this file (plus scripts/) unchanged.
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Runs before anything else lands in the workspace.
+      - name: Secret scan (gitleaks)
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest dir /repo --no-banner
+
+      - name: Install PyYAML
+        run: python3 -m pip install pyyaml
+
+      - name: Check out vaka source
+        uses: actions/checkout@v4
+        with:
+          repository: infrasecture/vaka
+          path: .vaka-src
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .vaka-src/go.mod
+          cache-dependency-path: .vaka-src/go.sum
+
+      - name: Build vaka
+        working-directory: .vaka-src
+        run: go build -o "$RUNNER_TEMP/vaka" ./cmd/vaka
+
+      - name: Validate recipes
+        run: |
+          set -euo pipefail
+          base=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          fi
+
+          fail=0
+          for dir in */ ; do
+            name="${dir%/}"
+            case "$name" in scripts) continue ;; esac
+
+            if [ ! -f "$dir/recipe.yaml" ]; then
+              echo "::error::top-level directory '$name' is not a recipe (recipe.yaml missing)"
+              fail=1
+              continue
+            fi
+
+            bump_args=()
+            if [ -n "$base" ] && ! git diff --quiet "$base"...HEAD -- "$dir"; then
+              if git cat-file -e "$base:$dir/recipe.yaml" 2>/dev/null; then
+                git show "$base:$dir/recipe.yaml" > "$RUNNER_TEMP/base-recipe.yaml"
+                bump_args=(--require-bump-from "$RUNNER_TEMP/base-recipe.yaml")
+              fi
+            fi
+
+            echo "==> $name"
+            python3 scripts/validate_recipe.py "$name" "${bump_args[@]}" || fail=1
+
+            compose_file=""
+            for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+              [ -e "$dir/$f" ] && { compose_file="$f"; break; }
+            done
+            if [ -n "$compose_file" ]; then
+              (cd "$dir" && "$RUNNER_TEMP/vaka" validate --compose "$compose_file") || fail=1
+            fi
+          done
+          exit "$fail"
