@@ -1,0 +1,4 @@
+apiVersion: recipes.vaka/v1alpha1
+kind: RegistryIndex
+generated: "2026-07-10T22:30:00Z"
+recipes: {}
