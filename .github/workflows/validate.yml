@@ -70,12 +70,18 @@ jobs:
             echo "==> $name"
             python3 scripts/validate_recipe.py "$name" "${bump_args[@]}" || fail=1
 
-            compose_file=""
-            for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
-              [ -e "$dir/$f" ] && { compose_file="$f"; break; }
+            # Validate the policy against the same base+override compose files
+            # vaka up (and vaka get's staged validation) load — compose-go
+            # precedence, base and override chosen independently.
+            compose_args=()
+            for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+              [ -e "$dir/$f" ] && { compose_args+=(--compose "$f"); break; }
             done
-            if [ -n "$compose_file" ]; then
-              (cd "$dir" && "$RUNNER_TEMP/vaka" validate --compose "$compose_file") || fail=1
+            for f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
+              [ -e "$dir/$f" ] && { compose_args+=(--compose "$f"); break; }
+            done
+            if [ ${#compose_args[@]} -gt 0 ]; then
+              (cd "$dir" && "$RUNNER_TEMP/vaka" validate "${compose_args[@]}") || fail=1
             fi
           done
           exit "$fail"

@@ -39,7 +39,16 @@ ALLOWED_KEYS = {
 RESERVED_KEYS = {"provides", "requires"}
 ENV_ENTRY_KEYS = {"name", "required", "default", "description"}
 ACK_ENTRY_KEYS = {"flag", "reason"}
-COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+# Exactly compose-go's DefaultFileNames / DefaultOverrideFileNames (cli/
+# options.go), in precedence order — base and override are selected
+# INDEPENDENTLY (the override is not tied to the base's family), and .yml
+# precedes .yaml for docker-compose. Keep these identical to the Go lint so
+# the risk lint sees the same files `vaka up` loads.
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+COMPOSE_OVERRIDE_FILES = (
+    "compose.override.yml", "compose.override.yaml",
+    "docker-compose.override.yml", "docker-compose.override.yaml",
+)
 BROAD_MOUNT_SOURCES = {"/", "/home", "/root", "/etc", "/usr", "/var", "/proc", "/sys"}
 BROAD_CAPS = {"SYS_ADMIN", "ALL"}
 VAKA_INIT_LABEL = "agent.vaka.init"
@@ -168,41 +177,49 @@ def check_tree(recipe_dir):
                     err(f"{rel}: symlink escapes the recipe directory ({target})")
 
 
-def compose_file(recipe_dir):
-    for name in COMPOSE_FILES:
+def first_existing(recipe_dir, names):
+    for name in names:
         if os.path.exists(os.path.join(recipe_dir, name)):
             return name
-    err(f"{recipe_dir}: no compose file found (looked for {', '.join(COMPOSE_FILES)})")
     return None
 
 
-def compose_files(recipe_dir, base):
-    """Base file plus its override, matching docker's default discovery — so
-    the risk lint sees exactly what `vaka up` runs, including the override
-    (the documented customization mechanism)."""
+def compose_file(recipe_dir):
+    base = first_existing(recipe_dir, COMPOSE_FILES)
+    if base is None:
+        err(f"{recipe_dir}: no compose file found (looked for {', '.join(COMPOSE_FILES)})")
+    return base
+
+
+def compose_files(recipe_dir):
+    """Base file plus its override, chosen with compose-go's exact precedence
+    (base and override selected independently) — so the risk lint sees exactly
+    what `vaka up` runs, including the override."""
+    base = first_existing(recipe_dir, COMPOSE_FILES)
+    if base is None:
+        return []
     files = [base]
-    family = "docker-compose" if base.startswith("docker-compose") else "compose"
-    for ext in ("yaml", "yml"):
-        override = f"{family}.override.{ext}"
-        if os.path.exists(os.path.join(recipe_dir, override)):
-            files.append(override)
-            break
+    override = first_existing(recipe_dir, COMPOSE_OVERRIDE_FILES)
+    if override is not None:
+        files.append(override)
     return files
 
 
-def rendered_compose(recipe_dir, base):
+def rendered_compose(recipe_dir):
+    files = compose_files(recipe_dir)
+    label = "+".join(files) if files else "compose"
     args = ["docker", "compose"]
-    for f in compose_files(recipe_dir, base):
+    for f in files:
         args += ["-f", f]
     args += ["config", "--format", "json"]
     proc = subprocess.run(args, cwd=recipe_dir, capture_output=True, text=True)
     if proc.returncode != 0:
-        err(f"{recipe_dir}/{base}: docker compose config failed:\n{proc.stderr.strip()}")
+        err(f"{recipe_dir}/{label}: docker compose config failed:\n{proc.stderr.strip()}")
         return None
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        err(f"{recipe_dir}/{base}: docker compose config emitted invalid JSON: {e}")
+        err(f"{recipe_dir}/{label}: docker compose config emitted invalid JSON: {e}")
         return None
 
 
@@ -282,7 +299,7 @@ def main():
         with open(args.compose_config, encoding="utf-8") as f:
             config = json.load(f)
     elif cf:
-        config = rendered_compose(recipe_dir, cf)
+        config = rendered_compose(recipe_dir)
 
     policy = None
     vaka_yaml = os.path.join(recipe_dir, "vaka.yaml")

@@ -69,12 +69,18 @@ jobs:
           python3 scripts/validate_recipe.py "$NAME" \
             --expect-version "$VERSION" \
             --summary-json "$RUNNER_TEMP/policy-summary.json"
-          for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
-            if [ -e "$NAME/$f" ]; then
-              (cd "$NAME" && "$RUNNER_TEMP/vaka" validate --compose "$f")
-              break
-            fi
+          # Validate the policy against the same base+override compose files
+          # vaka up loads (compose-go precedence, chosen independently).
+          compose_args=()
+          for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+            [ -e "$NAME/$f" ] && { compose_args+=(--compose "$f"); break; }
           done
+          for f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
+            [ -e "$NAME/$f" ] && { compose_args+=(--compose "$f"); break; }
+          done
+          if [ ${#compose_args[@]} -gt 0 ]; then
+            (cd "$NAME" && "$RUNNER_TEMP/vaka" validate "${compose_args[@]}")
+          fi
 
       - name: Package deterministic tarball
         id: pkg
