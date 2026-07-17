@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Runs on the tagged commit, which may not have gone through PR
+      # validation; do not publish a release built from leaked secrets.
+      - name: Secret scan (gitleaks)
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest dir /repo --no-banner
+
       - name: Parse tag
         id: tag
         run: |
@@ -94,13 +99,19 @@ jobs:
           DIGEST: ${{ steps.pkg.outputs.digest }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" "${NAME}-${VERSION}.tar.gz" \
+          # Idempotent: on a rerun after a partial failure (e.g. the index
+          # step failed), re-attach the asset instead of failing because the
+          # release already exists.
+          if ! gh release create "$GITHUB_REF_NAME" "${NAME}-${VERSION}.tar.gz" \
             --title "$GITHUB_REF_NAME" \
             --notes "Recipe \`$NAME\` version \`$VERSION\`.
 
           Tarball digest: \`$DIGEST\`
 
-          Install (once \`vaka get\` ships): \`vaka get $NAME@$VERSION\`"
+          Install (once \`vaka get\` ships): \`vaka get $NAME@$VERSION\`"; then
+            echo "release exists; re-uploading asset"
+            gh release upload "$GITHUB_REF_NAME" "${NAME}-${VERSION}.tar.gz" --clobber
+          fi
 
       - name: Update index on gh-pages
         env:
@@ -110,6 +121,10 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${NAME}-${VERSION}.tar.gz"
+          if ! git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            echo "::error::the gh-pages branch does not exist; bootstrap it once (an empty index.yaml) and enable GitHub Pages before publishing"
+            exit 1
+          fi
           git fetch origin gh-pages
           git worktree add -B gh-pages pages origin/gh-pages
           python3 scripts/build_index.py \

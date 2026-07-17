@@ -176,18 +176,33 @@ def compose_file(recipe_dir):
     return None
 
 
-def rendered_compose(recipe_dir, file):
-    proc = subprocess.run(
-        ["docker", "compose", "-f", file, "config", "--format", "json"],
-        cwd=recipe_dir, capture_output=True, text=True,
-    )
+def compose_files(recipe_dir, base):
+    """Base file plus its override, matching docker's default discovery — so
+    the risk lint sees exactly what `vaka up` runs, including the override
+    (the documented customization mechanism)."""
+    files = [base]
+    family = "docker-compose" if base.startswith("docker-compose") else "compose"
+    for ext in ("yaml", "yml"):
+        override = f"{family}.override.{ext}"
+        if os.path.exists(os.path.join(recipe_dir, override)):
+            files.append(override)
+            break
+    return files
+
+
+def rendered_compose(recipe_dir, base):
+    args = ["docker", "compose"]
+    for f in compose_files(recipe_dir, base):
+        args += ["-f", f]
+    args += ["config", "--format", "json"]
+    proc = subprocess.run(args, cwd=recipe_dir, capture_output=True, text=True)
     if proc.returncode != 0:
-        err(f"{recipe_dir}/{file}: docker compose config failed:\n{proc.stderr.strip()}")
+        err(f"{recipe_dir}/{base}: docker compose config failed:\n{proc.stderr.strip()}")
         return None
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        err(f"{recipe_dir}/{file}: docker compose config emitted invalid JSON: {e}")
+        err(f"{recipe_dir}/{base}: docker compose config emitted invalid JSON: {e}")
         return None
 
 
