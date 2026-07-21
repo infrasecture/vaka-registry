@@ -70,14 +70,12 @@ jobs:
             --expect-version "$VERSION" \
             --summary-json "$RUNNER_TEMP/policy-summary.json"
           # Validate the policy against the same base+override compose files
-          # vaka up loads (compose-go precedence, chosen independently).
+          # vaka up loads. The file list comes from validate_recipe.py — the
+          # single source of truth for compose-go's precedence.
           compose_args=()
-          for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
-            [ -e "$NAME/$f" ] && { compose_args+=(--compose "$f"); break; }
-          done
-          for f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
-            [ -e "$NAME/$f" ] && { compose_args+=(--compose "$f"); break; }
-          done
+          while IFS= read -r f; do
+            [ -n "$f" ] && compose_args+=(--compose "$f")
+          done < <(python3 scripts/validate_recipe.py "$NAME" --print-compose-files)
           if [ ${#compose_args[@]} -gt 0 ]; then
             (cd "$NAME" && "$RUNNER_TEMP/vaka" validate "${compose_args[@]}")
           fi

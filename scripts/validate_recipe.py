@@ -287,9 +287,17 @@ def main():
     ap.add_argument("--compose-config", metavar="JSON",
                     help="pre-rendered `docker compose config --format json` output "
                          "(otherwise docker compose is invoked)")
+    ap.add_argument("--print-compose-files", action="store_true",
+                    help="print the base+override compose files (one per line) and exit; "
+                         "the single source of truth for the workflows' vaka validate")
     args = ap.parse_args()
 
     recipe_dir = args.recipe_dir.rstrip("/")
+
+    if args.print_compose_files:
+        for f in compose_files(recipe_dir):
+            print(f)
+        return 0
     manifest = check_manifest(recipe_dir, args.expect_version, args.require_bump_from)
     check_tree(recipe_dir)
 

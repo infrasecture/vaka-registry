@@ -71,15 +71,13 @@ jobs:
             python3 scripts/validate_recipe.py "$name" "${bump_args[@]}" || fail=1
 
             # Validate the policy against the same base+override compose files
-            # vaka up (and vaka get's staged validation) load — compose-go
-            # precedence, base and override chosen independently.
+            # vaka up (and vaka get's staged validation) load. The file list
+            # comes from validate_recipe.py — the single source of truth for
+            # compose-go's precedence — not a duplicated bash copy.
             compose_args=()
-            for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
-              [ -e "$dir/$f" ] && { compose_args+=(--compose "$f"); break; }
-            done
-            for f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
-              [ -e "$dir/$f" ] && { compose_args+=(--compose "$f"); break; }
-            done
+            while IFS= read -r f; do
+              [ -n "$f" ] && compose_args+=(--compose "$f")
+            done < <(python3 scripts/validate_recipe.py "$name" --print-compose-files)
             if [ ${#compose_args[@]} -gt 0 ]; then
               (cd "$dir" && "$RUNNER_TEMP/vaka" validate "${compose_args[@]}") || fail=1
             fi
