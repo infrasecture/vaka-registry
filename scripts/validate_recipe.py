@@ -12,8 +12,10 @@ Checks:
     manifest (--require-bump-from) and tag check (--expect-version)
   - required files: recipe.yaml, README.md, vaka.yaml, compose file
   - no reserved .vaka-* paths, no committed .env, symlinks stay in-tree
-  - risk lint over `docker compose config` + vaka.yaml; every flag must be
-    acknowledged in riskAcknowledgements or validation fails
+  - risk lint over `docker compose config` + vaka.yaml; every gating flag
+    must be acknowledged in riskAcknowledgements or validation fails.
+    Advisory flags (ADVISORY_FLAGS, e.g. unpinned-image) are surfaced as
+    warnings and never fail CI.
   - optional machine-readable policy summary for the index (--summary-json)
 
 Exit code 0 on success, 1 with per-line `::error::`/`::warning::` output
@@ -52,6 +54,10 @@ COMPOSE_OVERRIDE_FILES = (
 BROAD_MOUNT_SOURCES = {"/", "/home", "/root", "/etc", "/usr", "/var", "/proc", "/sys"}
 BROAD_CAPS = {"SYS_ADMIN", "ALL"}
 VAKA_INIT_LABEL = "agent.vaka.init"
+# Advisory flags are surfaced to users but never fail CI (they need no
+# riskAcknowledgements), because the pattern they flag is common and not, on
+# its own, a gate.
+ADVISORY_FLAGS = {"unpinned-image"}
 
 errors = []
 warnings = []
@@ -263,6 +269,9 @@ def risk_lint(recipe_dir, config, policy):
                 flag(svc_name, "broad-bind-mount")
         if labels_of(svc).get(VAKA_INIT_LABEL) == "present":
             flag(svc_name, "disables-vaka-init")
+        image = svc.get("image") or ""
+        if image and "@sha256:" not in image:
+            flag(svc_name, "unpinned-image")
 
         pol = policy_services.get(svc_name)
         if pol is None:
@@ -322,7 +331,9 @@ def main():
              if isinstance(a, dict) and isinstance(a.get("flag"), str)}
     for f in flags:
         flag_name = f.split(":", 1)[1]
-        if flag_name in acked:
+        if flag_name in ADVISORY_FLAGS:
+            warn(f"{recipe_dir}: advisory risk flag {f} (surfaced to users; not a CI failure)")
+        elif flag_name in acked:
             warn(f"{recipe_dir}: risk flag {f} is acknowledged in recipe.yaml")
         else:
             err(f"{recipe_dir}: risk flag {f} is not acknowledged in riskAcknowledgements")
