@@ -1,6 +1,6 @@
 services:
   codex:
-    image: ghcr.io/infrasecture/harness-workstation
+    image: ghcr.io/infrasecture/harness-workstation:latest@sha256:45996ddd4b72925d0259297820567d5a236f6db2c81d4aa604d2f671a31fbeba
     container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
     init: true
     tty: true
@@ -28,7 +28,7 @@ services:
       - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable
+    image: docker.litellm.ai/berriai/litellm:main-stable@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e
     init: true
     command: ["--config", "/app/config.yaml", "--telemetry", "False", "--debug"]
     environment:

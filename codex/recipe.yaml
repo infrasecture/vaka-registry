@@ -1,7 +1,7 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: Recipe
 name: codex
-version: 0.1.0
+version: 0.1.1
 description: Codex agent in an egress-restricted container with a LiteLLM gateway sidecar
 homepage: https://github.com/infrasecture/vaka-registry/tree/main/codex
 tags: [agent, openai, codex, litellm]
