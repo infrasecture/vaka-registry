@@ -44,6 +44,8 @@ Your current project directory is mounted inside the Codex container as:
 
 That is the main boundary to keep in mind. Files inside the project directory are available to the agent. Files outside that directory are not mounted into the Codex container by this example.
 
+The container runs as your host user (same UID/GID), so files the agent creates under your project directory stay owned by you rather than by root. Because of this, run the stack through `myCodex` — it collects your host identity and passes it to Compose. Bare `docker compose up` or `vaka up` will not know your UID/GID, and the container refuses to start without it.
+
 Common commands:
 
 ```sh

@@ -5,26 +5,31 @@ services:
     init: true
     tty: true
     stdin_open: true
-    working_dir: /workspace
+    working_dir: ${MYCODEX_WORKDIR:-/workspace}
 
     environment:
-      # Explicit, but matches the default behavior of Codex anyway
-      CODEX_HOME: /root/.codex
+      # Host identity, supplied by ./myCodex, so the container runs as *you*
+      # (via gosu): files the agent creates under /workspace stay owned by your
+      # host user instead of root. The image entrypoint refuses to start if
+      # these are unset — run the stack through ./myCodex, not bare `vaka up`.
+      MYCODEX_HOST_UID: ${MYCODEX_HOST_UID:-}
+      MYCODEX_HOST_GID: ${MYCODEX_HOST_GID:-}
+      MYCODEX_HOST_USER: ${MYCODEX_HOST_USER:-}
+      MYCODEX_HOST_GROUP: ${MYCODEX_HOST_GROUP:-}
+      MYCODEX_HOST_GROUPS: ${MYCODEX_HOST_GROUPS:-}
+      MYCODEX_CONTAINER_HOME: ${MYCODEX_CONTAINER_HOME:-/home/codex}
+      MYCODEX_WORKDIR: ${MYCODEX_WORKDIR:-/workspace}
+      CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
       CODEX_BYOBU_SESSION: codex
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
+      # The agent reaches the model only through the LiteLLM sidecar; this is
+      # the internal proxy key, never the upstream provider key.
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
     command: ["bash", "/usr/local/bin/codex-prestart.sh"]
 
-    healthcheck:
-      test: ["CMD-SHELL", "byobu-tmux has-session -t \"$${CODEX_BYOBU_SESSION:-codex}\" >/dev/null 2>&1"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-      start_period: 1s
-
     volumes:
-      - ${WORKSPACE_DIR:-./}:/workspace
-      - codex_state:/root/
+      - ${WORKSPACE_DIR:-./}:${MYCODEX_WORKDIR:-/workspace}
+      - codex_state:${MYCODEX_CONTAINER_HOME:-/home/codex}
       - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
 
   litellm:

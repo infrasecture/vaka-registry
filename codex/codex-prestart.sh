@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-codex_home="${CODEX_HOME:-/root/.codex}"
+codex_home="${CODEX_HOME:-/home/codex/.codex}"
 config_file="${codex_home}/config.toml"
 tmp_file="${config_file}.tmp.$$"
 
@@ -62,7 +62,8 @@ mv "${tmp_file}" "${config_file}"
 
 # Optional interactive attach (disabled by default; enable with CODEX_AUTO_ATTACH=1)
 if [[ -t 0 && -t 1 && "${CODEX_AUTO_ATTACH:-0}" == "1" ]]; then
-  exec byobu -r "${SESSION}" 2>/dev/null || exec byobu -r
+  session="${CODEX_BYOBU_SESSION:-codex}"
+  exec byobu -r "${session}" 2>/dev/null || exec byobu -r
 fi
 
 # Keep container alive for later exec/attach

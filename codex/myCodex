@@ -24,6 +24,56 @@ fi
 
 CONTAINER_NAME="${PROJECT_NAME}-codex"
 
+# --- Host identity ------------------------------------------------------------
+# The harness image runs everything as the invoking user via gosu, so files the
+# agent creates under the mounted workspace stay owned by you, not root. The
+# image entrypoint refuses to start without these values, so myCodex collects
+# them here and passes them to Compose.
+host_group_specs() {
+  local gids names
+  local -a gid_list name_list specs
+  local i name
+
+  gids="$(id -G)"
+  names="$(id -Gn)"
+  read -r -a gid_list <<<"${gids}"
+  read -r -a name_list <<<"${names}"
+
+  specs=()
+  for i in "${!gid_list[@]}"; do
+    name="${name_list[$i]:-group-${gid_list[$i]}}"
+    specs+=("${gid_list[$i]}:${name}")
+  done
+
+  local IFS=,
+  printf '%s\n' "${specs[*]}"
+}
+
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+HOST_USER="$(id -un)"
+HOST_GROUP="$(id -gn)"
+HOST_GROUPS="$(host_group_specs)"
+CONTAINER_HOME="/home/codex"
+CONTAINER_WORKDIR="/workspace"
+CODEX_HOME_PATH="${CONTAINER_HOME}/.codex"
+
+# Environment forwarded to every Compose invocation. Secrets (OPENAI_API_KEY,
+# LITELLM_MASTER_KEY) are exported by ensure_start_secrets and inherited.
+MYCODEX_COMPOSE_ENV=(
+  "WORKSPACE_DIR=${CALLER_DIR}"
+  "CODEX_CONTAINER_NAME=${CONTAINER_NAME}"
+  "MYCODEX_ATTACH_HINT=${SCRIPT_DIR}/myCodex"
+  "MYCODEX_HOST_UID=${HOST_UID}"
+  "MYCODEX_HOST_GID=${HOST_GID}"
+  "MYCODEX_HOST_USER=${HOST_USER}"
+  "MYCODEX_HOST_GROUP=${HOST_GROUP}"
+  "MYCODEX_HOST_GROUPS=${HOST_GROUPS}"
+  "MYCODEX_CONTAINER_HOME=${CONTAINER_HOME}"
+  "MYCODEX_WORKDIR=${CONTAINER_WORKDIR}"
+  "MYCODEX_CODEX_HOME=${CODEX_HOME_PATH}"
+)
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -152,19 +202,13 @@ ensure_compose_command() {
 
 compose_run() {
   ensure_compose_command
-  env \
-    WORKSPACE_DIR="${CALLER_DIR}" \
-    CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
-    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
+  env "${MYCODEX_COMPOSE_ENV[@]}" \
     "${COMPOSE_COMMAND[@]}" -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
 }
 
 compose() {
   ensure_compose_command
-  exec env \
-    WORKSPACE_DIR="${CALLER_DIR}" \
-    CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
-    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
+  exec env "${MYCODEX_COMPOSE_ENV[@]}" \
     "${COMPOSE_COMMAND[@]}" -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
 }
 
@@ -172,13 +216,46 @@ is_running() {
   compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
 }
 
+# The tmux session belongs to the runtime (host) user, so attach/exec must gosu
+# into it — a plain root exec cannot see that user's tmux socket.
 attach_tmux() {
-  compose exec -it "${SERVICE}" tmux attach -t "${SESSION}"
+  compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
+    env \
+      HOME="${CONTAINER_HOME}" \
+      USER="${HOST_USER}" \
+      LOGNAME="${HOST_USER}" \
+      CODEX_HOME="${CODEX_HOME_PATH}" \
+      tmux attach -t "${SESSION}"
+}
+
+# Poll for the runtime user's tmux session (the image no longer ships a
+# steady-state healthcheck), failing fast if the container exits.
+wait_for_ready() {
+  local deadline state
+  deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+  while (( SECONDS <= deadline )); do
+    if compose_run exec -T "${SERVICE}" gosu "${HOST_USER}" \
+        env CODEX_HOME="${CODEX_HOME_PATH}" \
+        byobu-tmux has-session -t "${SESSION}" >/dev/null 2>&1; then
+      return 0
+    fi
+    state="$(docker inspect --format '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+    if [[ "${state}" == "exited" || "${state}" == "dead" ]]; then
+      echo "myCodex: container ${state} during startup" >&2
+      compose_run logs --tail 80 "${SERVICE}" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "myCodex: startup timed out after ${WAIT_TIMEOUT_SECONDS}s" >&2
+  compose_run logs --tail 80 "${SERVICE}" >&2 || true
+  return 1
 }
 
 start_stack() {
   ensure_start_secrets
-  compose_run up -d --build --force-recreate --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}" "$@"
+  compose_run up -d --no-build --force-recreate "$@"
+  wait_for_ready
 }
 
 if [[ $# -eq 0 ]]; then
@@ -225,7 +302,15 @@ case "${subcommand}" in
       usage >&2
       exit 2
     fi
-    compose exec -it "${SERVICE}" "$@"
+    # shellcheck disable=SC2016 # Expanded by the target user's login shell.
+    compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
+      env \
+        HOME="${CONTAINER_HOME}" \
+        USER="${HOST_USER}" \
+        LOGNAME="${HOST_USER}" \
+        CODEX_HOME="${CODEX_HOME_PATH}" \
+        MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+        bash --login -c 'cd "${MYCODEX_WORKDIR}"; exec "$@"' bash "$@"
     ;;
   *)
     compose "${subcommand}" "$@"
