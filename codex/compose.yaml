@@ -1,6 +1,6 @@
 services:
   codex:
-    image: ghcr.io/infrasecture/harness-workstation:latest@sha256:45996ddd4b72925d0259297820567d5a236f6db2c81d4aa604d2f671a31fbeba
+    image: ghcr.io/infrasecture/harness-workstation:0.145.0@sha256:a9eb5b71fd406456df6ec2ab44d69d65e2bc65a71419e27cf0b472cb987dcd7d
     container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
     init: true
     tty: true
