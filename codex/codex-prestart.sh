@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
+# Runs as the container command (as the runtime user, after the image entrypoint
+# has provisioned the user, written the base codex config, and created the tmux
+# session). It idempotently adds the LiteLLM provider to codex's config and then
+# keeps the container alive.
+#
+# It deliberately does NOT manage `[projects."<workdir>"]`: the image entrypoint
+# already writes that for the real, path-parity workdir. This script only owns
+# the top-level `model_provider` line and the `[model_providers.litellm]` table,
+# stripping any prior copy before re-adding — so repeated boots against a
+# persistent state volume never duplicate the block, and everything else the
+# entrypoint wrote is preserved.
 set -euo pipefail
 
-codex_home="${CODEX_HOME:-/home/codex/.codex}"
+codex_home="${CODEX_HOME:-${MYCODEX_CODEX_HOME:-/home/codex/.codex}}"
 config_file="${codex_home}/config.toml"
 tmp_file="${config_file}.tmp.$$"
 
@@ -9,44 +20,31 @@ mkdir -p "${codex_home}"
 touch "${config_file}"
 
 awk '
-  BEGIN {
-    print "model_provider = \"litellm\""
-  }
-
   function is_table(line) {
     return line ~ /^[[:space:]]*\[[^]]+\][[:space:]]*([#].*)?$/
   }
 
-  /^[[:space:]]*\[model_providers\.litellm\][[:space:]]*([#].*)?$/ ||
-  /^[[:space:]]*\[projects\."\/workspace"\][[:space:]]*([#].*)?$/ {
+  # Drop our managed provider table (until the next table header or EOF).
+  /^[[:space:]]*\[model_providers\.litellm\][[:space:]]*([#].*)?$/ {
     skip_managed_block = 1
     next
   }
+  skip_managed_block && is_table($0) { skip_managed_block = 0 }
+  skip_managed_block { next }
 
-  skip_managed_block && is_table($0) {
-    skip_managed_block = 0
-  }
+  # Drop any prior top-level model_provider line (before the first table).
+  is_table($0) { in_table = 1 }
+  !in_table && /^[[:space:]]*model_provider[[:space:]]*=/ { next }
 
-  skip_managed_block {
-    next
-  }
-
-  is_table($0) {
-    in_table = 1
-  }
-
-  !in_table && /^[[:space:]]*(model_provider|openai_base_url)[[:space:]]*=/ {
-    next
-  }
-
-  {
-    print
-  }
+  # Buffer everything else so the output can be reassembled deterministically.
+  { buf[n++] = $0 }
 
   END {
-    print ""
-    print "[projects.\"/workspace\"]"
-    print "trust_level = \"trusted\""
+    # Trim trailing blank lines so re-runs produce byte-identical output.
+    while (n > 0 && buf[n - 1] ~ /^[[:space:]]*$/) { n-- }
+
+    print "model_provider = \"litellm\""
+    for (i = 0; i < n; i++) { print buf[i] }
     print ""
     print "[model_providers.litellm]"
     print "name = \"LiteLLM local proxy\""
@@ -60,11 +58,6 @@ awk '
 
 mv "${tmp_file}" "${config_file}"
 
-# Optional interactive attach (disabled by default; enable with CODEX_AUTO_ATTACH=1)
-if [[ -t 0 && -t 1 && "${CODEX_AUTO_ATTACH:-0}" == "1" ]]; then
-  session="${CODEX_BYOBU_SESSION:-codex}"
-  exec byobu -r "${session}" 2>/dev/null || exec byobu -r
-fi
-
-# Keep container alive for later exec/attach
+# Keep the container alive. The image entrypoint already created the tmux session
+# used by `./myCodex attach`; this replaces the entrypoint's own keep-alive.
 exec sleep infinity

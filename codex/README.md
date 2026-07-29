@@ -1,10 +1,10 @@
 # Secure Codex Container With Vaka
 
-This example runs Codex inside a Docker container whose outbound network access is restricted by vaka. The goal is to let an agent work on your code while limiting what it can send to the internet.
+This recipe runs Codex inside a Docker container whose outbound network access is restricted by vaka. The goal is to let an agent work on your code while limiting what it can send to the internet.
 
 The setup uses two containers:
 
-- `codex`: the agent harness where Codex runs and where your project is mounted at `/workspace`.
+- `codex`: the agent harness where Codex runs and where your project is mounted.
 - `litellm`: a local LLM gateway that receives Codex model requests and forwards them to the model provider.
 
 Vaka blocks direct egress from the Codex container. Codex can talk to the LiteLLM sidecar, but it cannot directly call arbitrary websites, pastebin services, webhooks, package hosts, or other internet endpoints. LiteLLM is the only path from the agent container to the LLM provider.
@@ -13,58 +13,58 @@ Vaka blocks direct egress from the Codex container. Codex can talk to the LiteLL
 
 LLM agents can be tricked by prompts, repository content, test output, or tool results. A malicious instruction might ask the agent to reveal API keys, upload private source code, or send sensitive files to an external server.
 
-This example reduces that risk by isolating the agent inside a container with blocked egress. Even if the agent is jailbroken or prompted to exfiltrate data, the Codex container cannot directly connect to the internet. Its blast radius is the code and files mounted into `/workspace`.
+This recipe reduces that risk by isolating the agent inside a container with blocked egress. Even if the agent is jailbroken or prompted to exfiltrate data, the Codex container cannot directly connect to the internet. Its blast radius is the code and files in the project directory you run it from.
 
-This does not make unsafe code safe, and it does not hide files that you place inside the mounted workspace. If a secret is present under the project directory you run from, the agent may be able to read it. The protection is that the agent should not have a direct network path to send that secret somewhere else.
+This does not make unsafe code safe, and it does not hide files that you place inside the mounted project directory. If a secret is present under the project directory you run from, the agent may be able to read it. The protection is that the agent should not have a direct network path to send that secret somewhere else.
 
 ## What You Need
 
-- Docker with Compose support.
-- `vaka` installed and available on your `PATH`.
+- Docker with Compose v2.
+- `vaka` installed and on your `PATH` — it is **required**; every Compose call is routed through it for egress enforcement.
 - An OpenAI API key, provided when prompted or through `OPENAI_API_KEY`.
-
-If `vaka` is missing, `myCodex` will warn you before falling back to plain Docker Compose. Running without vaka removes the egress protection.
 
 ## How To Run It
 
-Run `myCodex` from the project directory you want the agent to work on, not from this example directory.
+Run `myCodex` from the project directory you want the agent to work on — **not** from this recipe directory (that would mount the recipe's own `.secrets` into the container).
 
 ```sh
 cd /path/to/your/project
-/path/to/examples/codex/myCodex
+/path/to/codex/myCodex
 ```
 
-On first run, `myCodex` asks for your `OPENAI_API_KEY` if it is not already set. It then starts the container stack and attaches you to the Codex session.
+On first run, `myCodex` asks for your `OPENAI_API_KEY` if it is not already set, stores it under the recipe's `.secrets/`, mints a fresh internal LiteLLM key, starts the stack, and attaches you to the Codex session.
 
-Your current project directory is mounted inside the Codex container as:
+Your project directory is mounted inside the container **at its own host path** (path parity), and that is the working directory. Only that directory is bind-mounted; files outside it are not shared with the container.
 
-```text
-/workspace
-```
-
-That is the main boundary to keep in mind. Files inside the project directory are available to the agent. Files outside that directory are not mounted into the Codex container by this example.
-
-The container runs as your host user (same UID/GID), so files the agent creates under your project directory stay owned by you rather than by root. Because of this, run the stack through `myCodex` — it collects your host identity and passes it to Compose. Bare `docker compose up` or `vaka up` will not know your UID/GID, and the container refuses to start without it.
+The container runs as your host user (same UID/GID), so files the agent creates under your project stay owned by you rather than by root. `myCodex` collects your host identity and passes it to the stack — this is why you run through it and not bare `docker compose`.
 
 Common commands:
 
 ```sh
-/path/to/examples/codex/myCodex
-/path/to/examples/codex/myCodex ps
-/path/to/examples/codex/myCodex stop
-/path/to/examples/codex/myCodex restart
-/path/to/examples/codex/myCodex exec bash
+/path/to/codex/myCodex            # start (if needed) and attach
+/path/to/codex/myCodex ps
+/path/to/codex/myCodex stop
+/path/to/codex/myCodex restart
+/path/to/codex/myCodex exec bash
+```
+
+### Per-project state (default)
+
+Each project directory gets its **own** Codex state volume (home, config, history), so state never drifts between projects or leaks across them. To share a single state volume across all projects instead, set `MYCODEX_SHARED_STATE=1`:
+
+```sh
+MYCODEX_SHARED_STATE=1 /path/to/codex/myCodex
 ```
 
 ## How The Network Boundary Works
 
-The Codex container has a strict vaka egress policy:
+The Codex container has a strict vaka egress policy (`vaka.yaml`):
 
 - It can resolve DNS.
 - It can connect to the `litellm` sidecar on port `4000`.
 - Other outbound connections are rejected.
 
-The LiteLLM sidecar has its own narrower allowlist for LLM-provider traffic. In this example it can reach the model provider endpoints needed to serve as the gateway.
+The LiteLLM sidecar has its own narrower allowlist for LLM-provider traffic. In this recipe it can reach the model-provider endpoints needed to serve as the gateway.
 
 In normal use, Codex sends model requests to:
 
@@ -72,11 +72,11 @@ In normal use, Codex sends model requests to:
 http://litellm:4000/v1
 ```
 
-LiteLLM forwards those requests using the real provider API key. Codex receives only the temporary proxy key generated for the local LiteLLM service, not the real provider key.
+LiteLLM forwards those requests using the real provider API key. Codex receives only the temporary proxy key generated for the local LiteLLM service, never the real provider key.
 
 ## Practical Security Model
 
-This example is meant to limit accidental or prompt-driven data exfiltration from the agent harness.
+This recipe is meant to limit accidental or prompt-driven data exfiltration from the agent harness.
 
 It helps with:
 
@@ -87,15 +87,15 @@ It helps with:
 It does not solve:
 
 - Secrets that are already committed or stored inside the mounted project directory.
-- Commands that change or delete files inside `/workspace`.
+- Commands that change or delete files inside the project directory.
 - Trust decisions about code the agent writes for you.
 - All possible Docker, host, or kernel escape risks.
 
-Treat `/workspace` as the allowed blast radius. Put only the project files the agent needs there, and keep unrelated secrets outside that directory.
+Treat the project directory as the allowed blast radius. Put only the project files the agent needs there, and keep unrelated secrets outside it.
 
 ## Extending The Setup
 
-You can add more sidecar containers when the agent needs controlled access to a service. For example, instead of letting Codex reach the internet directly, add a local sidecar for the capability you want and allow Codex to talk only to that sidecar.
+You can add more sidecar containers when the agent needs controlled access to a service. Instead of letting Codex reach the internet directly, add a local sidecar for the capability you want and allow Codex to talk only to that sidecar.
 
 Possible extensions include:
 
@@ -107,14 +107,20 @@ Possible extensions include:
 
 The pattern is the same: keep Codex blocked by default, give it access to a narrow local service, and put the internet-facing permissions on that service only when needed.
 
-You can also relax `vaka.yaml` to allow Codex to reach specific hosts or services directly. That is possible, but it is not recommended as the default. Each extra allowed destination is another place a jailbroken or misled agent could send sensitive data.
+You can also relax `vaka.yaml` to allow Codex to reach specific hosts directly. That is possible but not recommended as the default: each extra allowed destination is another place a jailbroken or misled agent could send sensitive data.
 
 ## Stopping The Stack
 
-From any project directory, run:
+From your project directory, run:
 
 ```sh
-/path/to/examples/codex/myCodex stop
+/path/to/codex/myCodex stop
 ```
 
 The next start recreates the stack with a fresh LiteLLM proxy key.
+
+## How It's Assembled
+
+The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstream [myCodex](https://github.com/emsi/myCodex) project; the top-level `myCodex` is a thin wrapper that adds the secrets and points the launcher at vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml` defines the two services (both images pinned by digest) and `vaka.yaml` is the egress policy.
+
+> Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.

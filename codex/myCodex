@@ -1,99 +1,36 @@
 #!/usr/bin/env bash
+# Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
+#
+# It adds only what upstream does not provide: it collects the provider API key,
+# mints a fresh internal LiteLLM proxy key, and routes every Compose call through
+# vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
+# path-parity workdir, per-project state (--private-env), attach/exec, readiness
+# — is handled by the vendored launcher unchanged.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CALLER_DIR="$(pwd -P)"
 
+# Running from the recipe directory would bind-mount this directory — including
+# .secrets — into the container as the workspace. Refuse it.
 if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
-  echo "myCodex: running from its own directory exposes secrets inside the container; it should be run from a project dir." >&2
+  echo "myCodex: running from its own directory exposes secrets inside the container; run it from a project dir." >&2
   exit 2
 fi
 
-COMPOSE_FILE="${SCRIPT_DIR}/compose.yaml"
-SERVICE="${CODEX_SERVICE:-codex}"
-SESSION="${CODEX_BYOBU_SESSION:-codex}"
-WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
-COMPOSE_COMMAND=()
-
-RAW_NAME="$(basename -- "${CALLER_DIR}")"
-PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
-
-if [[ -z "${PROJECT_NAME}" ]]; then
-  PROJECT_NAME="workspace"
-fi
-
-CONTAINER_NAME="${PROJECT_NAME}-codex"
-
-# --- Host identity ------------------------------------------------------------
-# The harness image runs everything as the invoking user via gosu, so files the
-# agent creates under the mounted workspace stay owned by you, not root. The
-# image entrypoint refuses to start without these values, so myCodex collects
-# them here and passes them to Compose.
-host_group_specs() {
-  local gids names
-  local -a gid_list name_list specs
-  local i name
-
-  gids="$(id -G)"
-  names="$(id -Gn)"
-  read -r -a gid_list <<<"${gids}"
-  read -r -a name_list <<<"${names}"
-
-  specs=()
-  for i in "${!gid_list[@]}"; do
-    name="${name_list[$i]:-group-${gid_list[$i]}}"
-    specs+=("${gid_list[$i]}:${name}")
-  done
-
-  local IFS=,
-  printf '%s\n' "${specs[*]}"
-}
-
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
-HOST_USER="$(id -un)"
-HOST_GROUP="$(id -gn)"
-HOST_GROUPS="$(host_group_specs)"
-CONTAINER_HOME="/home/codex"
-CONTAINER_WORKDIR="/workspace"
-CODEX_HOME_PATH="${CONTAINER_HOME}/.codex"
-
-# Environment forwarded to every Compose invocation. Secrets (OPENAI_API_KEY,
-# LITELLM_MASTER_KEY) are exported by ensure_start_secrets and inherited.
-MYCODEX_COMPOSE_ENV=(
-  "WORKSPACE_DIR=${CALLER_DIR}"
-  "CODEX_CONTAINER_NAME=${CONTAINER_NAME}"
-  "MYCODEX_ATTACH_HINT=${SCRIPT_DIR}/myCodex"
-  "MYCODEX_HOST_UID=${HOST_UID}"
-  "MYCODEX_HOST_GID=${HOST_GID}"
-  "MYCODEX_HOST_USER=${HOST_USER}"
-  "MYCODEX_HOST_GROUP=${HOST_GROUP}"
-  "MYCODEX_HOST_GROUPS=${HOST_GROUPS}"
-  "MYCODEX_CONTAINER_HOME=${CONTAINER_HOME}"
-  "MYCODEX_WORKDIR=${CONTAINER_WORKDIR}"
-  "MYCODEX_CODEX_HOME=${CODEX_HOME_PATH}"
-)
-
-usage() {
-  cat <<'EOF'
-Usage:
-  myCodex                      Start stack if needed, then attach
-  myCodex attach               Attach to tmux session in codex service
-  myCodex ps [args...]         compose ps
-  myCodex start [args...]      Recreate/start stack with a fresh LiteLLM proxy key
-  myCodex stop [args...]       compose stop (defaults to codex)
-  myCodex restart [args...]    Recreate/start stack with a fresh LiteLLM proxy key
-  myCodex exec <cmd...>        compose exec -it codex <cmd...>
-  myCodex <compose-cmd> ...    Pass through to compose
-EOF
-}
+# Pinned harness image, kept in sync with docker-compose.yaml. Setting these
+# makes the launcher's pre-up image-tag resolution use this value verbatim
+# instead of probing the registry; the compose file pins by digest, so the tag
+# is only informational.
+export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
+export MYCODEX_IMAGE_TAG="0.145.0"
 
 ensure_secret_env() {
   local env_name="$1"
   local env_value="${!env_name-}"
   local secrets_dir="${SCRIPT_DIR}/.secrets"
-  local secret_file="${secrets_dir}/$(printf '%s' "${env_name}" | tr '[:upper:]' '[:lower:]')"
-  local old_umask
+  local secret_file old_umask
+  secret_file="${secrets_dir}/$(printf '%s' "${env_name}" | tr '[:upper:]' '[:lower:]')"
 
   if [[ -n "${env_value}" ]]; then
     export "${env_name}=${env_value}"
@@ -140,11 +77,6 @@ ensure_secret_env() {
   export "${env_name}=${env_value}"
 }
 
-ensure_start_secrets() {
-  ensure_secret_env OPENAI_API_KEY
-  generate_litellm_proxy_key
-}
-
 generate_litellm_proxy_key() {
   local proxy_key
 
@@ -162,157 +94,25 @@ generate_litellm_proxy_key() {
   export LITELLM_MASTER_KEY="${proxy_key}"
 }
 
-ensure_compose_command() {
-  local answer
-
-  if [[ ${#COMPOSE_COMMAND[@]} -gt 0 ]]; then
-    return
-  fi
-
-  if command -v vaka >/dev/null 2>&1; then
-    COMPOSE_COMMAND=(vaka "--vaka-file=${SCRIPT_DIR}/vaka.yaml" compose)
-    return
-  fi
-
-  echo "myCodex: WARNING: vaka is missing; docker compose will run without network policy enforcement." >&2
-
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "myCodex: docker is also missing; cannot run compose command." >&2
-    exit 2
-  fi
-
-  if ! { : < /dev/tty > /dev/tty; } 2>/dev/null; then
-    echo "myCodex: cannot ask whether to use docker compose without a tty." >&2
-    exit 2
-  fi
-
-  printf 'Use docker compose anyway? [y/N] ' > /dev/tty
-  IFS= read -r answer < /dev/tty || answer=
-
-  case "${answer}" in
-    y|Y|yes|YES|Yes)
-      COMPOSE_COMMAND=(docker compose)
-      ;;
-    *)
-      echo "myCodex: refusing to run without vaka network policy enforcement." >&2
-      exit 2
-      ;;
-  esac
-}
-
-compose_run() {
-  ensure_compose_command
-  env "${MYCODEX_COMPOSE_ENV[@]}" \
-    "${COMPOSE_COMMAND[@]}" -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
-}
-
-compose() {
-  ensure_compose_command
-  exec env "${MYCODEX_COMPOSE_ENV[@]}" \
-    "${COMPOSE_COMMAND[@]}" -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
-}
-
-is_running() {
-  compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
-}
-
-# The tmux session belongs to the runtime (host) user, so attach/exec must gosu
-# into it — a plain root exec cannot see that user's tmux socket.
-attach_tmux() {
-  compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
-    env \
-      HOME="${CONTAINER_HOME}" \
-      USER="${HOST_USER}" \
-      LOGNAME="${HOST_USER}" \
-      CODEX_HOME="${CODEX_HOME_PATH}" \
-      tmux attach -t "${SESSION}"
-}
-
-# Poll for the runtime user's tmux session (the image no longer ships a
-# steady-state healthcheck), failing fast if the container exits.
-wait_for_ready() {
-  local deadline state
-  deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
-  while (( SECONDS <= deadline )); do
-    if compose_run exec -T "${SERVICE}" gosu "${HOST_USER}" \
-        env CODEX_HOME="${CODEX_HOME_PATH}" \
-        byobu-tmux has-session -t "${SESSION}" >/dev/null 2>&1; then
-      return 0
-    fi
-    state="$(docker inspect --format '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
-    if [[ "${state}" == "exited" || "${state}" == "dead" ]]; then
-      echo "myCodex: container ${state} during startup" >&2
-      compose_run logs --tail 80 "${SERVICE}" >&2 || true
-      return 1
-    fi
-    sleep 1
-  done
-  echo "myCodex: startup timed out after ${WAIT_TIMEOUT_SECONDS}s" >&2
-  compose_run logs --tail 80 "${SERVICE}" >&2 || true
-  return 1
-}
-
-start_stack() {
-  ensure_start_secrets
-  compose_run up -d --no-build --force-recreate "$@"
-  wait_for_ready
-}
-
-if [[ $# -eq 0 ]]; then
-  if is_running; then
-    attach_tmux
-  fi
-
-  start_stack
-  attach_tmux
-fi
-
-subcommand="$1"
-shift || true
-
-case "${subcommand}" in
-  help|-h|--help)
-    usage
-    ;;
-  attach)
-    attach_tmux
-    ;;
-  ps)
-    compose ps "$@"
-    ;;
-  start)
-    start_stack "$@"
-    ;;
-  stop)
-    if [[ $# -eq 0 ]]; then
-      compose stop "${SERVICE}"
-    else
-      compose stop "$@"
-    fi
-    ;;
-  restart)
-    start_stack "$@"
-    ;;
-  up)
-    start_stack "$@"
-    ;;
-  exec)
-    if [[ $# -eq 0 ]]; then
-      echo "myCodex: exec requires a command" >&2
-      usage >&2
-      exit 2
-    fi
-    # shellcheck disable=SC2016 # Expanded by the target user's login shell.
-    compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
-      env \
-        HOME="${CONTAINER_HOME}" \
-        USER="${HOST_USER}" \
-        LOGNAME="${HOST_USER}" \
-        CODEX_HOME="${CODEX_HOME_PATH}" \
-        MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
-        bash --login -c 'cd "${MYCODEX_WORKDIR}"; exec "$@"' bash "$@"
-    ;;
-  *)
-    compose "${subcommand}" "$@"
+# Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
+# render Compose config without them (Compose prints a benign unset-var warning).
+case "${1:-}" in
+  ""|up|start|restart)
+    ensure_secret_env OPENAI_API_KEY
+    generate_litellm_proxy_key
     ;;
 esac
+
+# Route every Compose invocation the launcher makes through vaka's egress policy.
+export MYCODEX_COMPOSE="vaka --vaka-file=${SCRIPT_DIR}/vaka.yaml compose"
+
+# Default to a per-project Codex state volume: it isolates each project's codex
+# home/state and sidesteps the ownership drift a shared, long-lived home volume
+# accumulates across projects and image versions. Opt back into a single shared
+# volume with MYCODEX_SHARED_STATE=1.
+private_env=()
+if [[ "${MYCODEX_SHARED_STATE:-0}" != "1" ]]; then
+  private_env=(--private-env)
+fi
+
+exec "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "$@"

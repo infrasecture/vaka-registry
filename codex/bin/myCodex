@@ -1,0 +1,698 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=bin/lib/mycodex-image.sh
+source "${SCRIPT_DIR}/lib/mycodex-image.sh"
+
+COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
+SERVICE="${CODEX_SERVICE:-codex}"
+SESSION="${CODEX_BYOBU_SESSION:-codex}"
+WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
+STARTUP_PROGRESS_INTERVAL_SECONDS="${MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS:-2}"
+IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
+IMAGE_TAG="${MYCODEX_IMAGE_TAG:-}"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+HOST_USER="$(id -un)"
+HOST_GROUP="$(id -gn)"
+CONTAINER_HOME="${MYCODEX_CONTAINER_HOME:-${HOME:-/home/${HOST_USER}}}"
+
+CALLER_DIR="$(pwd -P)"
+CONTAINER_WORKDIR="${MYCODEX_WORKDIR:-${CALLER_DIR}}"
+RAW_NAME="$(basename -- "${CALLER_DIR}")"
+PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+
+if [[ -z "${PROJECT_NAME}" ]]; then
+  PROJECT_NAME="workspace"
+fi
+
+CONTAINER_NAME="${PROJECT_NAME}-codex"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  myCodex [options]                  Start stack if needed, then attach
+  myCodex [options] attach           Attach to tmux session in codex service
+  myCodex [options] ps [args...]     docker compose ps
+  myCodex [options] start [args...]  docker compose start (defaults to codex)
+  myCodex [options] stop [args...]   docker compose stop (defaults to codex)
+  myCodex [options] restart [args...] docker compose restart (defaults to codex)
+  myCodex [options] exec <cmd...>    docker compose exec -it codex <cmd...>
+  myCodex [options] <compose-cmd> ... Pass through to docker compose
+
+Options:
+  --private-env                      Use a per-project Codex state volume
+  -v, --volume <spec>                Add an extra Docker-style volume mount
+  -f, --compose-file <path>          Add an extra Compose override file
+EOF
+}
+
+die() {
+  echo "myCodex: $*" >&2
+  exit 2
+}
+
+yaml_quote() {
+  local value="$1"
+  value="${value//\'/\'\'}"
+  printf "'%s'" "${value}"
+}
+
+host_group_specs() {
+  local gids names
+  local -a gid_list name_list specs
+  local i name
+
+  gids="$(id -G)"
+  names="$(id -Gn)"
+  read -r -a gid_list <<<"${gids}"
+  read -r -a name_list <<<"${names}"
+
+  specs=()
+  for i in "${!gid_list[@]}"; do
+    name="${name_list[$i]:-group-${gid_list[$i]}}"
+    specs+=("${gid_list[$i]}:${name}")
+  done
+
+  local IFS=,
+  printf '%s\n' "${specs[*]}"
+}
+
+normalize_mount_source() {
+  local source="$1"
+
+  case "${source}" in
+    \~)
+      printf '%s' "${HOME}"
+      ;;
+    \~/*)
+      printf '%s' "${HOME}/${source#\~/}"
+      ;;
+    .|..|./*|../*)
+      realpath -m -- "${CALLER_DIR}/${source}"
+      ;;
+    *)
+      printf '%s' "${source}"
+      ;;
+  esac
+}
+
+normalize_compose_file() {
+  local file="$1"
+
+  case "${file}" in
+    *$'\n'*|*$'\r'*)
+      die "compose file path must not contain newlines"
+      ;;
+    /*)
+      printf '%s' "${file}"
+      ;;
+    *)
+      realpath -m -- "${CALLER_DIR}/${file}"
+      ;;
+  esac
+}
+
+is_managed_mount_target() {
+  local target="$1"
+
+  while [[ "${target}" != "/" && "${target}" == */ ]]; do
+    target="${target%/}"
+  done
+
+  case "${target}" in
+    "${CONTAINER_WORKDIR}"|"${CONTAINER_HOME}"|/workspace|/root|/root/.codex)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+EXTRA_VOLUME_SPECS=()
+ADDITIONAL_COMPOSE_FILES=()
+PRIVATE_ENV=0
+RUNTIME_CONFIG_CHANGED=0
+EXTRA_VOLUME_OVERRIDE_FILE=""
+HOST_GROUPS="$(host_group_specs)"
+
+cleanup() {
+  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    rm -f -- "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  fi
+}
+trap cleanup EXIT
+
+add_extra_volume() {
+  local spec="$1"
+  local source target mode rest
+
+  case "${spec}" in
+    *$'\n'*|*$'\r'*)
+      die "volume spec must not contain newlines"
+      ;;
+  esac
+
+  IFS=':' read -r source target mode rest <<<"${spec}"
+
+  if [[ -z "${source}" || -z "${target}" || -n "${rest:-}" ]]; then
+    die "volume spec must use source:target[:mode] syntax: ${spec}"
+  fi
+
+  if [[ "${spec}" == *: ]]; then
+    die "volume spec mode must not be empty: ${spec}"
+  fi
+
+  if [[ "${target}" != /* ]]; then
+    die "volume target must be an absolute container path: ${spec}"
+  fi
+
+  if is_managed_mount_target "${target}"; then
+    die "volume target conflicts with a managed myCodex mount: ${target}"
+  fi
+
+  source="$(normalize_mount_source "${source}")"
+
+  if [[ -n "${mode:-}" ]]; then
+    EXTRA_VOLUME_SPECS+=("${source}:${target}:${mode}")
+  else
+    EXTRA_VOLUME_SPECS+=("${source}:${target}")
+  fi
+
+  RUNTIME_CONFIG_CHANGED=1
+}
+
+add_compose_file() {
+  local file
+
+  file="$(normalize_compose_file "$1")"
+
+  if [[ ! -f "${file}" ]]; then
+    die "compose override file does not exist: ${file}"
+  fi
+
+  ADDITIONAL_COMPOSE_FILES+=("${file}")
+  RUNTIME_CONFIG_CHANGED=1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --private-env)
+      PRIVATE_ENV=1
+      RUNTIME_CONFIG_CHANGED=1
+      shift
+      ;;
+    -v|--volume)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a volume spec"
+      fi
+      add_extra_volume "$2"
+      shift 2
+      ;;
+    --volume=*)
+      add_extra_volume "${1#--volume=}"
+      shift
+      ;;
+    -f|--compose-file)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a compose file path"
+      fi
+      add_compose_file "$2"
+      shift 2
+      ;;
+    --compose-file=*)
+      add_compose_file "${1#--compose-file=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+STATE_VOLUME_NAME="codex_state"
+if [[ "${PRIVATE_ENV}" == "1" ]]; then
+  STATE_VOLUME_NAME="${PROJECT_NAME}_codex_state"
+fi
+
+ensure_state_volume() {
+  if ! docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
+    docker volume create "${STATE_VOLUME_NAME}" >/dev/null
+  fi
+}
+
+ensure_extra_volumes_override() {
+  if [[ ${#EXTRA_VOLUME_SPECS[@]} -eq 0 || -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    return
+  fi
+
+  EXTRA_VOLUME_OVERRIDE_FILE="$(mktemp -t mycodex-volumes.XXXXXX.yaml)"
+  {
+    printf 'services:\n'
+    printf '  codex:\n'
+    printf '    volumes:\n'
+    local volume
+    for volume in "${EXTRA_VOLUME_SPECS[@]}"; do
+      printf '      - '
+      yaml_quote "${volume}"
+      printf '\n'
+    done
+  } >"${EXTRA_VOLUME_OVERRIDE_FILE}"
+}
+
+ensure_runtime_image_tag() {
+  local scope="${1:-local}"
+
+  if [[ -n "${IMAGE_TAG}" ]]; then
+    return
+  fi
+
+  case "${scope}" in
+    local)
+      IMAGE_TAG="$(mycodex_resolve_latest_local_image_tag "${IMAGE_NAME}")"
+      ;;
+    remote)
+      IMAGE_TAG="$(mycodex_resolve_latest_remote_image_tag "${IMAGE_NAME}")"
+      ;;
+    *)
+      die "unknown image tag resolution scope: ${scope}"
+      ;;
+  esac
+
+  echo "myCodex: using ${IMAGE_NAME}:${IMAGE_TAG}" >&2
+}
+
+has_arg() {
+  local needle="$1"
+  shift
+
+  local arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+has_volume_arg() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      -v|--volumes)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+set_wait_timeout() {
+  case "$1" in
+    ''|*[!0-9]*)
+      die "wait timeout must be a positive integer: $1"
+      ;;
+    0)
+      die "wait timeout must be greater than zero"
+      ;;
+  esac
+
+  WAIT_TIMEOUT_SECONDS="$1"
+}
+
+validate_progress_interval() {
+  case "${STARTUP_PROGRESS_INTERVAL_SECONDS}" in
+    ''|*[!0-9]*)
+      die "startup progress interval must be a positive integer: ${STARTUP_PROGRESS_INTERVAL_SECONDS}"
+      ;;
+    0)
+      die "startup progress interval must be greater than zero"
+      ;;
+  esac
+}
+
+up_args_without_wait() {
+  local arg skip_next
+
+  skip_next=0
+  for arg in "$@"; do
+    if [[ "${skip_next}" == "1" ]]; then
+      set_wait_timeout "${arg}"
+      skip_next=0
+      continue
+    fi
+
+    case "${arg}" in
+      --wait)
+        ;;
+      --wait-timeout)
+        skip_next=1
+        ;;
+      --wait-timeout=*)
+        set_wait_timeout "${arg#--wait-timeout=}"
+        ;;
+      *)
+        printf '%s\n' "${arg}"
+        ;;
+    esac
+  done
+
+  if [[ "${skip_next}" == "1" ]]; then
+    die "--wait-timeout requires a value"
+  fi
+}
+
+compose_args() {
+  printf '%s\n' -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}"
+  local file
+  for file in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
+    printf '%s\n' -f "${file}"
+  done
+  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    printf '%s\n' -f "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  fi
+}
+
+run_docker_compose() {
+  local args=()
+  mapfile -t args < <(compose_args)
+
+  # Orchestrator command, overridable so a wrapper can enforce policy without
+  # forking this script. Default is `docker compose`; set MYCODEX_COMPOSE to a
+  # replacement that accepts the same compose arguments, e.g.
+  # `vaka --vaka-file=/path/vaka.yaml compose`. The value is word-split into
+  # argv, so it must not contain paths with spaces.
+  local compose_cmd=()
+  read -ra compose_cmd <<< "${MYCODEX_COMPOSE:-docker compose}"
+
+  env \
+    WORKSPACE_DIR="${CALLER_DIR}" \
+    CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
+    MYCODEX_LAUNCHED_BY_WRAPPER=1 \
+    MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
+    MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
+    MYCODEX_IMAGE_TAG="${IMAGE_TAG:-latest}" \
+    MYCODEX_HOST_UID="${HOST_UID}" \
+    MYCODEX_HOST_GID="${HOST_GID}" \
+    MYCODEX_HOST_USER="${HOST_USER}" \
+    MYCODEX_HOST_GROUP="${HOST_GROUP}" \
+    MYCODEX_HOST_GROUPS="${HOST_GROUPS}" \
+    MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
+    MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+    MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
+    "${compose_cmd[@]}" "${args[@]}" "$@"
+}
+
+compose_run() {
+  local image_tag_scope=""
+  if [[ "${1:-}" == "--resolve-local-image-tag" ]]; then
+    image_tag_scope="local"
+    shift
+  elif [[ "${1:-}" == "--resolve-remote-image-tag" ]]; then
+    image_tag_scope="remote"
+    shift
+  fi
+
+  if [[ -n "${image_tag_scope}" ]]; then
+    ensure_runtime_image_tag "${image_tag_scope}"
+  fi
+
+  ensure_state_volume
+  ensure_extra_volumes_override
+  run_docker_compose "$@"
+}
+
+compose() {
+  local image_tag_scope=""
+  if [[ "${1:-}" == "--resolve-local-image-tag" ]]; then
+    image_tag_scope="local"
+    shift
+  elif [[ "${1:-}" == "--resolve-remote-image-tag" ]]; then
+    image_tag_scope="remote"
+    shift
+  fi
+
+  if [[ -n "${image_tag_scope}" ]]; then
+    ensure_runtime_image_tag "${image_tag_scope}"
+  fi
+
+  ensure_state_volume
+  ensure_extra_volumes_override
+  run_docker_compose "$@"
+}
+
+compose_without_state_volume_creation() {
+  ensure_extra_volumes_override
+  run_docker_compose "$@"
+}
+
+is_running() {
+  compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+}
+
+attach_tmux() {
+  compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
+    env \
+      HOME="${CONTAINER_HOME}" \
+      USER="${HOST_USER}" \
+      LOGNAME="${HOST_USER}" \
+      CODEX_HOME="${CONTAINER_HOME}/.codex" \
+      tmux attach -t "${SESSION}"
+}
+
+container_state() {
+  docker inspect \
+    --format '{{.State.Status}}' \
+    "${CONTAINER_NAME}" 2>/dev/null || true
+}
+
+container_startup_status() {
+  local status
+
+  status="$(docker exec "${CONTAINER_NAME}" sh -c 'cat /run/mycodex-startup-status 2>/dev/null' 2>/dev/null || true)"
+  case "${status}" in
+    *$'\n'*)
+      status="${status%%$'\n'*}"
+      ;;
+  esac
+
+  case "${status}" in
+    "configuring runtime user"|"preparing workspace and home"|"initializing tool configuration"|"preparing workspace compatibility path"|"configuring byobu"|"creating tmux session"|"running command"|"attaching"|"ready")
+      printf '%s\n' "${status}"
+      ;;
+  esac
+}
+
+container_session_ready() {
+  docker exec "${CONTAINER_NAME}" gosu "${HOST_USER}" \
+    env CODEX_HOME="${CONTAINER_HOME}/.codex" \
+    byobu-tmux has-session -t "${SESSION}" >/dev/null 2>&1
+}
+
+wait_for_container_ready() {
+  local deadline elapsed state phase last_message message_key next_progress started
+
+  validate_progress_interval
+
+  started="${SECONDS}"
+  deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+  last_message=""
+  next_progress="${SECONDS}"
+
+  while (( SECONDS <= deadline )); do
+    state="$(container_state)"
+    phase="$(container_startup_status)"
+    elapsed="$((SECONDS - started))s"
+    message_key="${state}|${phase}"
+
+    if [[ "${state}" == "running" ]] && { [[ "${phase}" == "ready" ]] || container_session_ready; }; then
+      echo "myCodex: startup ready after ${elapsed}" >&2
+      return 0
+    fi
+
+    if [[ "${state}" == "exited" || "${state}" == "dead" ]]; then
+      echo "myCodex: container ${state} during startup" >&2
+      compose_run logs --tail 80 "${SERVICE}" >&2 || true
+      return 1
+    fi
+
+    if [[ "${message_key}" != "${last_message}" || "${SECONDS}" -ge "${next_progress}" ]]; then
+      if [[ -n "${phase}" ]]; then
+        echo "myCodex: startup ${elapsed}: ${phase} (${state:-unknown})" >&2
+      else
+        echo "myCodex: startup ${elapsed}: waiting for tmux session (${state:-unknown})" >&2
+      fi
+      last_message="${message_key}"
+      next_progress=$((SECONDS + STARTUP_PROGRESS_INTERVAL_SECONDS))
+    fi
+
+    sleep 1
+  done
+
+  echo "myCodex: startup timed out after ${WAIT_TIMEOUT_SECONDS}s" >&2
+  compose_run ps "${SERVICE}" >&2 || true
+  compose_run logs --tail 80 "${SERVICE}" >&2 || true
+  return 1
+}
+
+start_stack() {
+  if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
+    compose_run config >/dev/null
+  fi
+
+  compose_run --resolve-local-image-tag up -d --no-build
+  wait_for_container_ready
+}
+
+remove_state_volume() {
+  local removed
+
+  if ! docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
+    echo "myCodex: state volume ${STATE_VOLUME_NAME} did not exist" >&2
+    return
+  fi
+
+  removed="$(docker volume rm "${STATE_VOLUME_NAME}")"
+  echo "myCodex: removed state volume ${removed}" >&2
+}
+
+run_up() {
+  local -a args
+
+  if has_arg --wait "$@"; then
+    mapfile -t args < <(up_args_without_wait "$@")
+    if ! has_arg -d "${args[@]}" && ! has_arg --detach "${args[@]}"; then
+      args=(-d "${args[@]}")
+    fi
+    if has_arg --build "${args[@]}" || has_arg --no-build "${args[@]}"; then
+      compose_run --resolve-local-image-tag up "${args[@]}"
+    else
+      compose_run --resolve-local-image-tag up --no-build "${args[@]}"
+    fi
+    wait_for_container_ready
+    return
+  fi
+
+  if has_arg --build "$@" || has_arg --no-build "$@"; then
+    compose --resolve-local-image-tag up "$@"
+  else
+    compose --resolve-local-image-tag up --no-build "$@"
+  fi
+}
+
+run_down() {
+  local remove_volumes
+
+  remove_volumes=0
+  if has_volume_arg "$@"; then
+    remove_volumes=1
+  fi
+
+  compose_without_state_volume_creation down "$@"
+  if [[ "${remove_volumes}" == "1" ]]; then
+    remove_state_volume
+  fi
+}
+
+run_default() {
+  if ! is_running || [[ "${RUNTIME_CONFIG_CHANGED}" == "1" ]]; then
+    start_stack
+  fi
+
+  attach_tmux
+}
+
+if [[ $# -eq 0 ]]; then
+  run_default
+  exit $?
+fi
+
+subcommand="$1"
+shift || true
+
+case "${subcommand}" in
+  help|-h|--help)
+    usage
+    ;;
+  attach)
+    attach_tmux
+    ;;
+  ps)
+    compose ps "$@"
+    ;;
+  start)
+    if [[ $# -eq 0 ]]; then
+      compose start "${SERVICE}"
+    else
+      compose start "$@"
+    fi
+    ;;
+  stop)
+    if [[ $# -eq 0 ]]; then
+      compose stop "${SERVICE}"
+    else
+      compose stop "$@"
+    fi
+    ;;
+  restart)
+    if [[ $# -eq 0 ]]; then
+      compose restart "${SERVICE}"
+    else
+      compose restart "$@"
+    fi
+    ;;
+  exec)
+    if [[ $# -eq 0 ]]; then
+      echo "myCodex: exec requires a command" >&2
+      usage >&2
+      exit 2
+    fi
+    # shellcheck disable=SC2016 # Expanded by the target user's login shell.
+    compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
+      env \
+        HOME="${CONTAINER_HOME}" \
+        USER="${HOST_USER}" \
+        LOGNAME="${HOST_USER}" \
+        CODEX_HOME="${CONTAINER_HOME}/.codex" \
+        MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+        bash --login -c 'cd "${MYCODEX_WORKDIR}"; exec "$@"' bash "$@"
+    ;;
+  up|create)
+    if [[ "${subcommand}" == "up" ]]; then
+      run_up "$@"
+    else
+      if has_arg --build "$@" || has_arg --no-build "$@"; then
+        compose --resolve-local-image-tag "${subcommand}" "$@"
+      else
+        compose --resolve-local-image-tag "${subcommand}" --no-build "$@"
+      fi
+    fi
+    ;;
+  down)
+    run_down "$@"
+    ;;
+  pull)
+    compose --resolve-remote-image-tag "${subcommand}" "$@"
+    ;;
+  *)
+    compose "${subcommand}" "$@"
+    ;;
+esac

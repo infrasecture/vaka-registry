@@ -1,25 +1,30 @@
+# Recipe compose, driven by the vendored upstream launcher (bin/myCodex) through
+# vaka. The launcher sets MYCODEX_WORKDIR to the caller's directory and
+# MYCODEX_CONTAINER_HOME to the host $HOME, so the workspace is mounted at its
+# own host path (path parity) and files stay owned by the invoking user — none
+# of these paths are hardcoded here. Run the stack via ./myCodex, never bare
+# `docker compose`.
 services:
   codex:
     image: ghcr.io/infrasecture/harness-workstation:0.145.0@sha256:a9eb5b71fd406456df6ec2ab44d69d65e2bc65a71419e27cf0b472cb987dcd7d
     # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
-    # vaka never inspects the image to recover them. This removes the "image not
-    # available locally" preflight and closes the inspect-vs-run gap a forced
-    # pull could otherwise open (see vaka troubleshooting: "Inspected Image May
-    # Differ From The Running Image"). The entrypoint starts as root and drops to
-    # the host user itself via gosu, so the service must run as root here.
+    # vaka never inspects the image to recover them. The entrypoint starts as
+    # root and drops to the host user itself via gosu, so the service runs as
+    # root here.
     user: "0:0"
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
     container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
+    restart: unless-stopped
     init: true
     tty: true
     stdin_open: true
     working_dir: ${MYCODEX_WORKDIR:-/workspace}
 
     environment:
-      # Host identity, supplied by ./myCodex, so the container runs as *you*
-      # (via gosu): files the agent creates under /workspace stay owned by your
-      # host user instead of root. The image entrypoint refuses to start if
-      # these are unset — run the stack through ./myCodex, not bare `vaka up`.
+      # Host identity, supplied by the launcher, so the container runs as *you*
+      # (via gosu): files the agent creates under the mounted workspace stay
+      # owned by your host user. The image entrypoint refuses to start if these
+      # are unset — run the stack through ./myCodex, not bare `docker compose`.
       MYCODEX_HOST_UID: ${MYCODEX_HOST_UID:-}
       MYCODEX_HOST_GID: ${MYCODEX_HOST_GID:-}
       MYCODEX_HOST_USER: ${MYCODEX_HOST_USER:-}
@@ -33,6 +38,10 @@ services:
       # The agent reaches the model only through the LiteLLM sidecar; this is
       # the internal proxy key, never the upstream provider key.
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+    # Inject the LiteLLM provider into codex config, then keep the container
+    # alive. This replaces the image entrypoint's default keep-alive; the tmux
+    # session used by `./myCodex attach` is still created by the entrypoint
+    # before this runs.
     command: ["bash", "/usr/local/bin/codex-prestart.sh"]
 
     volumes:
@@ -58,4 +67,8 @@ services:
       - "4000"
 
 volumes:
+  # Managed by the launcher (created via `docker volume create`); `--private-env`
+  # scopes it per project by setting MYCODEX_STATE_VOLUME_NAME.
   codex_state:
+    name: ${MYCODEX_STATE_VOLUME_NAME:-codex_state}
+    external: true
