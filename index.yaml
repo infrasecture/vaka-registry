@@ -1,8 +1,35 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: RegistryIndex
-generated: '2026-07-29T13:07:50Z'
+generated: '2026-07-29T18:16:51Z'
 recipes:
   codex:
+  - version: 0.2.0
+    description: Codex agent in an egress-restricted container with a LiteLLM gateway
+      sidecar
+    tags:
+    - agent
+    - openai
+    - codex
+    - litellm
+    created: '2026-07-29T18:16:51Z'
+    digest: sha256:7b8559ee849c4dc60156f069fc545594f4113ea45a57efe51c8b89b0f8148754
+    urls:
+    - https://github.com/infrasecture/vaka-registry/releases/download/codex-0.2.0/codex-0.2.0.tar.gz
+    minVakaVersion: 0.0.3
+    env:
+    - name: OPENAI_API_KEY
+      required: true
+      description: Model provider API key, consumed only by the LiteLLM gateway (the
+        agent container never sees it)
+    - name: LITELLM_MASTER_KEY
+      required: true
+      description: Internal key between the agent and the gateway; generated automatically
+        when launching via myCodex
+    policy:
+      defaultActions:
+        codex: reject
+        litellm: reject
+      riskFlags: []
   - version: 0.1.5
     description: Codex agent in an egress-restricted container with a LiteLLM gateway
       sidecar
