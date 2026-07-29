@@ -14,7 +14,6 @@ services:
     user: "0:0"
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
     container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
-    restart: unless-stopped
     init: true
     tty: true
     stdin_open: true

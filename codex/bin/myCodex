@@ -36,6 +36,7 @@ usage() {
 Usage:
   myCodex [options]                  Start stack if needed, then attach
   myCodex [options] attach           Attach to tmux session in codex service
+  myCodex [options] info             Print the resolved configuration and exit
   myCodex [options] ps [args...]     docker compose ps
   myCodex [options] start [args...]  docker compose start (defaults to codex)
   myCodex [options] stop [args...]   docker compose stop (defaults to codex)
@@ -620,6 +621,56 @@ run_default() {
   attach_tmux
 }
 
+# print_info emits the effective, resolved configuration as plain facts. It is
+# read-only: it reads volume metadata but never creates a volume or starts a
+# container. Values reflect the options given on the same command line (e.g.
+# --private-env changes the state volume name).
+print_info() {
+  local image_ref vol_state vol_created vol_mount
+
+  if [[ -n "${IMAGE_TAG}" ]]; then
+    image_ref="${IMAGE_NAME}:${IMAGE_TAG}"
+  else
+    image_ref="${IMAGE_NAME} (tag resolved at startup)"
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    vol_state="docker not available"
+  elif docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
+    vol_state="exists"
+    vol_created="$(docker volume inspect "${STATE_VOLUME_NAME}" --format '{{.CreatedAt}}' 2>/dev/null)"
+    vol_mount="$(docker volume inspect "${STATE_VOLUME_NAME}" --format '{{.Mountpoint}}' 2>/dev/null)"
+  else
+    vol_state="not created yet"
+  fi
+
+  printf 'myCodex configuration\n'
+  printf '  project name      %s\n' "${PROJECT_NAME}"
+  printf '  container name    %s\n' "${CONTAINER_NAME}"
+  printf '  image             %s\n' "${image_ref}"
+  printf '  workspace (host)  %s\n' "${CALLER_DIR}"
+  printf '  workdir (in ctr)  %s\n' "${CONTAINER_WORKDIR}"
+  printf '  home (in ctr)     %s\n' "${CONTAINER_HOME}"
+  printf '  host identity     %s:%s (%s:%s)\n' "${HOST_UID}" "${HOST_GID}" "${HOST_USER}" "${HOST_GROUP}"
+  if [[ "${PRIVATE_ENV:-0}" == "1" ]]; then
+    printf '  state volume      %s [%s] (per-project, --private-env)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
+  else
+    printf '  state volume      %s [%s] (shared)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
+  fi
+  if [[ "${vol_state}" == "exists" ]]; then
+    printf '  volume created    %s\n' "${vol_created}"
+    printf '  volume mountpoint %s\n' "${vol_mount}"
+  fi
+  printf '  orchestrator      %s\n' "${MYCODEX_COMPOSE:-docker compose}"
+  printf '  compose file      %s\n' "${COMPOSE_FILE}"
+  local f
+  if [[ ${#ADDITIONAL_COMPOSE_FILES[@]} -gt 0 ]]; then
+    for f in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
+      printf '  compose override  %s\n' "${f}"
+    done
+  fi
+}
+
 if [[ $# -eq 0 ]]; then
   run_default
   exit $?
@@ -634,6 +685,9 @@ case "${subcommand}" in
     ;;
   attach)
     attach_tmux
+    ;;
+  info)
+    print_info
     ;;
   ps)
     compose ps "$@"

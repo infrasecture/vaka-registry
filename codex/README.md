@@ -48,6 +48,14 @@ Common commands:
 /path/to/codex/myCodex exec bash
 ```
 
+To see the resolved configuration — project name, image, container home/workdir,
+host identity, and the **state volume name** (and whether it exists yet) — without
+starting anything:
+
+```sh
+/path/to/codex/myCodex info
+```
+
 ### Per-project state (default)
 
 Each project directory gets its **own** Codex state volume (home, config, history), so state never drifts between projects or leaks across them. To share a single state volume across all projects instead, set `MYCODEX_SHARED_STATE=1`:
