@@ -2,7 +2,7 @@
 # Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
 #
 # It adds only what upstream does not provide: it collects the provider API key,
-# mints a fresh internal LiteLLM proxy key, and routes every Compose call through
+# maintains an internal LiteLLM proxy key, and routes every Compose call through
 # vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
 # path-parity workdir, per-project state (--private-env), attach/exec, readiness
 # — is handled by the vendored launcher unchanged.
@@ -63,6 +63,35 @@ fi
 export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
 export MYCODEX_IMAGE_TAG="0.146.0"
 
+prepare_secrets_dir() {
+  local secrets_dir="$1"
+
+  if [[ -L "${secrets_dir}" || ( -e "${secrets_dir}" && ! -d "${secrets_dir}" ) ]]; then
+    echo "myCodex: ${secrets_dir} must be a real directory, not a symlink or other file." >&2
+    exit 2
+  fi
+  mkdir -p "${secrets_dir}"
+  chmod 700 "${secrets_dir}"
+}
+
+load_secret_env() {
+  local env_name="$1"
+  local secret_file="$2"
+  local env_value
+
+  if [[ -L "${secret_file}" || ! -f "${secret_file}" ]]; then
+    echo "myCodex: ${secret_file} must be a regular file, not a symlink or other file." >&2
+    exit 2
+  fi
+  IFS= read -r env_value < "${secret_file}" || true
+  if [[ -z "${env_value}" ]]; then
+    echo "myCodex: ${secret_file} is empty; ${env_name} is required." >&2
+    exit 2
+  fi
+  chmod 600 "${secret_file}"
+  export "${env_name}=${env_value}"
+}
+
 ensure_secret_env() {
   local env_name="$1"
   local env_value="${!env_name-}"
@@ -75,13 +104,11 @@ ensure_secret_env() {
     return
   fi
 
-  if [[ -f "${secret_file}" ]]; then
-    IFS= read -r env_value < "${secret_file}" || true
-    if [[ -z "${env_value}" ]]; then
-      echo "myCodex: ${secret_file} is empty; ${env_name} is required." >&2
-      exit 2
-    fi
-    export "${env_name}=${env_value}"
+  if [[ -e "${secrets_dir}" || -L "${secrets_dir}" ]]; then
+    prepare_secrets_dir "${secrets_dir}"
+  fi
+  if [[ -e "${secret_file}" || -L "${secret_file}" ]]; then
+    load_secret_env "${env_name}" "${secret_file}"
     return
   fi
 
@@ -90,8 +117,7 @@ ensure_secret_env() {
     exit 2
   fi
 
-  mkdir -p "${secrets_dir}"
-  chmod 700 "${secrets_dir}"
+  prepare_secrets_dir "${secrets_dir}"
 
   printf 'Enter %s: ' "${env_name}" > /dev/tty
   if ! IFS= read -r -s env_value < /dev/tty; then
@@ -129,7 +155,46 @@ generate_litellm_proxy_key() {
     exit 2
   fi
 
-  export LITELLM_MASTER_KEY="${proxy_key}"
+  printf '%s' "${proxy_key}"
+}
+
+ensure_litellm_proxy_key() {
+  local env_value="${LITELLM_MASTER_KEY-}"
+  local secrets_dir="${SCRIPT_DIR}/.secrets"
+  local secret_file="${secrets_dir}/litellm_master_key"
+  local proxy_key temp_file
+
+  # An explicit value is authoritative but is never copied into local storage.
+  if [[ -n "${env_value}" ]]; then
+    export LITELLM_MASTER_KEY="${env_value}"
+    return
+  fi
+
+  prepare_secrets_dir "${secrets_dir}"
+  if [[ -e "${secret_file}" || -L "${secret_file}" ]]; then
+    load_secret_env LITELLM_MASTER_KEY "${secret_file}"
+    return
+  fi
+
+  proxy_key="$(generate_litellm_proxy_key)"
+  temp_file="$(mktemp "${secrets_dir}/.litellm_master_key.XXXXXX")"
+  chmod 600 "${temp_file}"
+  if ! printf '%s\n' "${proxy_key}" > "${temp_file}"; then
+    rm -f -- "${temp_file}"
+    echo "myCodex: failed to write generated LiteLLM proxy key." >&2
+    exit 2
+  fi
+
+  # A hard link is an atomic no-clobber install. If another launcher won the
+  # race, discard our candidate and use the complete value it installed.
+  if command ln "${temp_file}" "${secret_file}" 2>/dev/null; then
+    rm -f -- "${temp_file}"
+    export LITELLM_MASTER_KEY="${proxy_key}"
+    return
+  fi
+
+  rm -f -- "${temp_file}"
+  load_secret_env LITELLM_MASTER_KEY "${secret_file}"
 }
 
 # Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
@@ -137,7 +202,7 @@ generate_litellm_proxy_key() {
 case "${1:-}" in
   ""|up|start|restart)
     ensure_secret_env OPENAI_API_KEY
-    generate_litellm_proxy_key
+    ensure_litellm_proxy_key
     ;;
 esac
 

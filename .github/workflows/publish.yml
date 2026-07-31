@@ -44,6 +44,9 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install pyyaml
 
+      - name: Test recipe wrappers
+        run: bash scripts/test_codex_wrapper.sh
+
       - name: Check out vaka source
         uses: actions/checkout@v4
         with:
