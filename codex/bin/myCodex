@@ -1,4 +1,83 @@
 #!/usr/bin/env bash
+
+# The launcher uses mapfile and relies on the fixed empty-array behavior from
+# Bash 4.4. Keep this check before every other command so an old host Bash gets
+# an actionable error instead of failing halfway through argument assembly.
+mycodex_bash_is_supported() {
+  (( BASH_VERSINFO[0] > 4 ||
+    (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
+}
+
+mycodex_try_shell_bash() {
+  local candidate="${SHELL:-}"
+  local candidate_version
+
+  case "${candidate}" in
+    bash|*/bash) ;;
+    *) return 1 ;;
+  esac
+  [[ -x "${candidate}" ]] || return 1
+
+  # shellcheck disable=SC2016 # Expanded by the candidate Bash, not this one.
+  if ! candidate_version="$(
+    "${candidate}" --noprofile --norc -c '
+      printf "%s" "${BASH_VERSION:-}"
+      (( BASH_VERSINFO[0] > 4 ||
+        (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
+    ' 2>/dev/null
+  )"; then
+    return 1
+  fi
+
+  printf 'myCodex: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
+    "${BASH_VERSION}" "${BASH:-bash}" "${candidate_version}" "${candidate}" >&2
+  exec "${candidate}" "${BASH_SOURCE[0]}" "$@"
+  return 1
+}
+
+mycodex_bash_failure() {
+  printf 'myCodex: Bash 4.4 or newer is required; running Bash %s via %s.\n' \
+    "${BASH_VERSION}" "${BASH:-bash}" >&2
+  printf 'myCodex: SHELL=%s did not identify an executable Bash 4.4+ fallback.\n' \
+    "${SHELL:-<unset>}" >&2
+
+  case "$(uname -s 2>/dev/null || true)" in
+    Darwin)
+      cat >&2 <<'EOF'
+myCodex: on macOS, install a current Bash and put Homebrew before /bin:
+  brew install bash
+  export PATH="$(brew --prefix)/bin:$PATH"
+Changing the login shell alone is not enough: /usr/bin/env normally selects
+bash from PATH. myCodex also tries a compatible Bash named by SHELL.
+EOF
+      ;;
+    Linux)
+      cat >&2 <<'EOF'
+myCodex: install or upgrade Bash with your distribution package manager, for
+example `apt-get install bash`, `dnf install bash`, or `apk add bash`, then
+verify `bash --version` reports 4.4 or newer.
+EOF
+      ;;
+    FreeBSD)
+      cat >&2 <<'EOF'
+myCodex: install a current Bash with `pkg install bash`, then put its directory
+before any older Bash in PATH.
+EOF
+      ;;
+    *)
+      printf 'myCodex: install Bash 4.4+ and ensure it is selected through PATH or SHELL.\n' >&2
+      ;;
+  esac
+}
+
+if ! mycodex_bash_is_supported; then
+  mycodex_try_shell_bash "$@"
+  mycodex_bash_failure
+  exit 2
+fi
+
+unset -f mycodex_bash_is_supported mycodex_try_shell_bash mycodex_bash_failure
+
 set -euo pipefail
 
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"

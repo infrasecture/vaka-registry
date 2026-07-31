@@ -21,6 +21,9 @@ This does not make unsafe code safe, and it does not hide files that you place i
 
 - Docker with Compose v2.
 - `vaka` installed and on your `PATH` — it is **required**; every Compose call is routed through it for egress enforcement.
+- Bash 4.4 or newer. On macOS, install it with Homebrew; the launcher will use
+  a compatible Bash from `$SHELL` automatically when `/usr/bin/env bash` finds
+  the older system Bash.
 - An OpenAI API key, provided when prompted or through `OPENAI_API_KEY`.
 
 ## How To Run It

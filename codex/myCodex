@@ -6,9 +6,47 @@
 # vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
 # path-parity workdir, per-project state (--private-env), attach/exec, readiness
 # — is handled by the vendored launcher unchanged.
-set -euo pipefail
+
+recipe_bash_is_supported() {
+  (( BASH_VERSINFO[0] > 4 ||
+    (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
+}
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# Fail or re-exec before secret prompting. The vendored launcher owns the full
+# diagnostic; this wrapper only handles a valid $SHELL early enough to preserve
+# its own setup path.
+if ! recipe_bash_is_supported; then
+  candidate="${SHELL:-}"
+  candidate_version=""
+  case "${candidate}" in
+    bash|*/bash)
+      if [[ -x "${candidate}" ]]; then
+        # shellcheck disable=SC2016 # Expanded by the candidate Bash.
+        candidate_version="$(
+          "${candidate}" --noprofile --norc -c '
+            printf "%s" "${BASH_VERSION:-}"
+            (( BASH_VERSINFO[0] > 4 ||
+              (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
+          ' 2>/dev/null
+        )" || candidate_version=""
+      fi
+      ;;
+  esac
+
+  if [[ -n "${candidate_version}" ]]; then
+    printf 'myCodex: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
+      "${BASH_VERSION}" "${BASH:-bash}" "${candidate_version}" "${candidate}" >&2
+    exec "${candidate}" "${BASH_SOURCE[0]}" "$@"
+  fi
+
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "$@"
+fi
+
+unset -f recipe_bash_is_supported
+set -euo pipefail
+
 CALLER_DIR="$(pwd -P)"
 
 # Running from the recipe directory would bind-mount this directory — including
@@ -23,7 +61,7 @@ fi
 # instead of probing the registry; the compose file pins by digest, so the tag
 # is only informational.
 export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
-export MYCODEX_IMAGE_TAG="0.145.0"
+export MYCODEX_IMAGE_TAG="0.146.0"
 
 ensure_secret_env() {
   local env_name="$1"
@@ -115,4 +153,4 @@ if [[ "${MYCODEX_SHARED_STATE:-0}" != "1" ]]; then
   private_env=(--private-env)
 fi
 
-exec "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "$@"
+exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "$@"
