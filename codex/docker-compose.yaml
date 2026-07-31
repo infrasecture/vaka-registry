@@ -18,6 +18,9 @@ services:
     tty: true
     stdin_open: true
     working_dir: ${MYCODEX_WORKDIR:-/workspace}
+    depends_on:
+      litellm:
+        condition: service_started
 
     environment:
       # Host identity, supplied by the launcher, so the container runs as *you*
