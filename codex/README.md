@@ -35,7 +35,15 @@ cd /path/to/your/project
 /path/to/codex/myCodex
 ```
 
-On first run, `myCodex` asks for your `OPENAI_API_KEY` if it is not already set, stores it under the recipe's `.secrets/`, mints a fresh internal LiteLLM key, starts the stack, and attaches you to the Codex session.
+On first run, `myCodex` asks for your `OPENAI_API_KEY` if it is not already set,
+stores the entered value under the recipe's `.secrets/`, creates an internal
+LiteLLM key, starts the stack, and attaches you to the Codex session. Values
+supplied through the environment are used without being copied to disk.
+
+The internal key is stored in `.secrets/litellm_master_key` with mode `0600`
+and reused. Keeping it stable prevents an unchanged `myCodex` invocation from
+recreating both containers. The `.secrets` directory is untracked recipe state,
+so `vaka get` updates preserve it.
 
 Your project directory is mounted inside the container **at its own host path** (path parity), and that is the working directory. Only that directory is bind-mounted; files outside it are not shared with the container.
 
@@ -83,7 +91,8 @@ In normal use, Codex sends model requests to:
 http://litellm:4000/v1
 ```
 
-LiteLLM forwards those requests using the real provider API key. Codex receives only the temporary proxy key generated for the local LiteLLM service, never the real provider key.
+LiteLLM forwards those requests using the real provider API key. Codex receives
+only the local proxy key shared with LiteLLM, never the real provider key.
 
 ## Practical Security Model
 
@@ -128,10 +137,17 @@ From your project directory, run:
 /path/to/codex/myCodex stop
 ```
 
-The next start recreates the stack with a fresh LiteLLM proxy key.
+Starting it again reuses the existing LiteLLM proxy key. To rotate that internal
+key, bring the stack down, remove `.secrets/litellm_master_key` from the recipe
+directory, and start it again. A non-empty `LITELLM_MASTER_KEY` environment
+value overrides the stored key for that invocation and is never persisted.
 
 ## How It's Assembled
 
 The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstream [myCodex](https://github.com/emsi/myCodex) project; the top-level `myCodex` is a thin wrapper that adds the secrets and points the launcher at vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml` defines the two services (both images pinned by digest) and `vaka.yaml` is the egress policy.
 
 > Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.
+
+> The first `up` after upgrading from 0.2.2 or older establishes the persistent
+> LiteLLM key and may recreate both services once. Later invocations leave
+> unchanged containers in place.
