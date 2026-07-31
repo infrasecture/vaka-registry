@@ -60,6 +60,23 @@ run_wrapper "${override_capture}" LITELLM_MASTER_KEY=explicit-test-override
 [[ "$(<"${override_capture}")" == "explicit-test-override" ]] || fail "environment override was not honored"
 [[ "$(<"${secret_file}")" == "${persisted_before}" ]] || fail "environment override modified persisted state"
 
+printf '\n' > "${secret_file}"
+empty_error="${TMP}/empty-error"
+if run_wrapper "${TMP}/capture-empty" > /dev/null 2> "${empty_error}"; then
+  fail "empty persisted key was silently accepted or replaced"
+fi
+grep -Fq 'is empty' "${empty_error}" || fail "empty-key failure was not actionable"
+
+rm -f -- "${secret_file}"
+symlink_target="${TMP}/symlink-target"
+printf '%s\n' 'must-not-be-read' > "${symlink_target}"
+ln -s "${symlink_target}" "${secret_file}"
+symlink_error="${TMP}/symlink-error"
+if run_wrapper "${TMP}/capture-symlink" > /dev/null 2> "${symlink_error}"; then
+  fail "symlinked persisted key was accepted"
+fi
+grep -Fq 'must be a regular file' "${symlink_error}" || fail "symlink failure was not actionable"
+
 rm -f -- "${secret_file}"
 concurrent_one="${TMP}/capture-concurrent-one"
 concurrent_two="${TMP}/capture-concurrent-two"
