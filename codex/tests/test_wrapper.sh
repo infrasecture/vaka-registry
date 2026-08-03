@@ -55,6 +55,13 @@ cmp -s "${capture_one}.proxy" "${secret_file}" || fail "launcher did not receive
 run_wrapper "${capture_two}" OPENAI_API_KEY=test-provider-key
 cmp -s "${capture_one}.proxy" "${capture_two}.proxy" || fail "successive launches received different keys"
 
+printf '%s\n' 'managed-provider-key' > "${secret_dir}/openai_api_key"
+chmod 600 "${secret_dir}/openai_api_key"
+managed_provider_capture="${TMP}/capture-managed-provider"
+run_wrapper "${managed_provider_capture}"
+[[ "$(<"${managed_provider_capture}.provider")" == "managed-provider-key" ]] || \
+  fail "managed provider key was not loaded"
+
 # Existing managed paths are read but never silently chmodded.
 chmod 750 "${secret_dir}"
 chmod 640 "${secret_file}"
@@ -123,6 +130,15 @@ if run_wrapper "${TMP}/capture-managed-dir" OPENAI_API_KEY=test-provider-key > /
 fi
 grep -Fq 'managed secret storage must be a real directory' "${managed_dir_error}" || \
   fail "managed-directory symlink failure was not actionable"
+
+external_only_capture="${TMP}/capture-external-only"
+run_wrapper "${external_only_capture}" \
+  OPENAI_API_KEY_FILE="${TMP}/provider-link" \
+  LITELLM_MASTER_KEY_FILE="${TMP}/proxy-link"
+[[ "$(<"${external_only_capture}.provider")" == "provider-from-file" ]] || \
+  fail "explicit provider file did not bypass managed storage"
+[[ "$(<"${external_only_capture}.proxy")" == "proxy-from-file" ]] || \
+  fail "explicit proxy file did not bypass managed storage"
 
 rm -f -- "${secret_dir}"
 mkdir -m 700 "${secret_dir}"

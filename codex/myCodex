@@ -231,11 +231,13 @@ resolve_secret_env() {
     return
   fi
 
-  ensure_managed_secrets_dir "${env_name}" "${secrets_dir}"
-  if [[ -e "${secret_file}" || -L "${secret_file}" ]]; then
-    env_value="$(read_managed_secret_value "${env_name}" "${secret_file}")"
-    export "${env_name}=${env_value}"
-    return
+  if [[ -e "${secrets_dir}" || -L "${secrets_dir}" ]]; then
+    ensure_managed_secrets_dir "${env_name}" "${secrets_dir}"
+    if [[ -e "${secret_file}" || -L "${secret_file}" ]]; then
+      env_value="$(read_managed_secret_value "${env_name}" "${secret_file}")"
+      export "${env_name}=${env_value}"
+      return
+    fi
   fi
 
   case "${acquisition}" in
@@ -250,6 +252,7 @@ resolve_secret_env() {
       return 2
       ;;
   esac
+  ensure_managed_secrets_dir "${env_name}" "${secrets_dir}"
   env_value="$(persist_managed_secret_value "${env_name}" "${secret_file}" "${env_value}")"
   export "${env_name}=${env_value}"
 }
