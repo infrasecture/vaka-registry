@@ -2,7 +2,7 @@
 # Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
 #
 # It adds only what upstream does not provide: it collects the provider API key,
-# mints a fresh internal LiteLLM proxy key, and routes every Compose call through
+# maintains an internal LiteLLM proxy key, and routes every Compose call through
 # vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
 # path-parity workdir, per-project state (--private-env), attach/exec, readiness
 # — is handled by the vendored launcher unchanged.
@@ -63,56 +63,131 @@ fi
 export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
 export MYCODEX_IMAGE_TAG="0.146.0"
 
-ensure_secret_env() {
+read_secret_value() {
   local env_name="$1"
-  local env_value="${!env_name-}"
-  local secrets_dir="${SCRIPT_DIR}/.secrets"
-  local secret_file old_umask
-  secret_file="${secrets_dir}/$(printf '%s' "${env_name}" | tr '[:upper:]' '[:lower:]')"
+  local secret_file="$2"
+  local env_value
 
-  if [[ -n "${env_value}" ]]; then
-    export "${env_name}=${env_value}"
-    return
+  if [[ ! -f "${secret_file}" ]]; then
+    echo "myCodex: ${secret_file} must resolve to a readable regular file for ${env_name}." >&2
+    return 2
+  fi
+  if ! IFS= read -r env_value < "${secret_file}"; then
+    # A final line without a newline is a valid one-line secret.
+    [[ -n "${env_value}" ]] || {
+      echo "myCodex: failed to read ${env_name} from ${secret_file}." >&2
+      return 2
+    }
+  fi
+  if [[ -z "${env_value}" ]]; then
+    echo "myCodex: ${secret_file} is empty; ${env_name} is required." >&2
+    return 2
   fi
 
-  if [[ -f "${secret_file}" ]]; then
-    IFS= read -r env_value < "${secret_file}" || true
-    if [[ -z "${env_value}" ]]; then
-      echo "myCodex: ${secret_file} is empty; ${env_name} is required." >&2
-      exit 2
+  printf '%s' "${env_value}"
+}
+
+ensure_managed_secrets_dir() {
+  local env_name="$1"
+  local secrets_dir="$2"
+
+  if [[ -L "${secrets_dir}" ]]; then
+    echo "myCodex: ${secrets_dir} is a symlink; managed secret storage must be a real directory." >&2
+    echo "myCodex: set ${env_name} or ${env_name}_FILE to use an external secret source." >&2
+    return 2
+  fi
+  if [[ -e "${secrets_dir}" ]]; then
+    if [[ ! -d "${secrets_dir}" ]]; then
+      echo "myCodex: ${secrets_dir} exists but is not a directory." >&2
+      return 2
     fi
-    export "${env_name}=${env_value}"
     return
   fi
+
+  if ! (umask 077 && mkdir -p -- "${secrets_dir}"); then
+    echo "myCodex: failed to create managed secret directory ${secrets_dir}." >&2
+    return 2
+  fi
+  if [[ -L "${secrets_dir}" || ! -d "${secrets_dir}" ]]; then
+    echo "myCodex: ${secrets_dir} did not resolve to a managed directory after creation." >&2
+    return 2
+  fi
+}
+
+read_managed_secret_value() {
+  local env_name="$1"
+  local secret_file="$2"
+
+  if [[ -L "${secret_file}" ]]; then
+    echo "myCodex: ${secret_file} is a symlink; managed secret files must be regular files." >&2
+    echo "myCodex: set ${env_name}_FILE to use an external file, including a symlink." >&2
+    return 2
+  fi
+  if [[ -e "${secret_file}" && ! -f "${secret_file}" ]]; then
+    echo "myCodex: ${secret_file} exists but is not a regular file." >&2
+    return 2
+  fi
+
+  read_secret_value "${env_name}" "${secret_file}"
+}
+
+persist_managed_secret_value() {
+  local env_name="$1"
+  local secret_file="$2"
+  local env_value="$3"
+  local secrets_dir temp_file winner
+  secrets_dir="$(dirname -- "${secret_file}")"
+
+  temp_file="$(mktemp "${secrets_dir}/.$(basename -- "${secret_file}").XXXXXX")" || {
+    echo "myCodex: failed to create a temporary file for ${secret_file}." >&2
+    return 2
+  }
+  chmod 600 "${temp_file}"
+  if ! printf '%s\n' "${env_value}" > "${temp_file}"; then
+    rm -f -- "${temp_file}"
+    echo "myCodex: failed to write ${secret_file}." >&2
+    return 2
+  fi
+
+  # Publish only a complete file, without replacing a concurrent winner or an
+  # existing path. Hard links provide this no-clobber operation on both Linux
+  # and macOS without requiring flock.
+  if command ln "${temp_file}" "${secret_file}" 2>/dev/null; then
+    rm -f -- "${temp_file}"
+    printf '%s' "${env_value}"
+    return
+  fi
+  rm -f -- "${temp_file}"
+
+  if winner="$(read_managed_secret_value "${env_name}" "${secret_file}")"; then
+    printf '%s' "${winner}"
+    return
+  fi
+  echo "myCodex: failed to atomically persist ${env_name} in ${secret_file}." >&2
+  return 2
+}
+
+prompt_secret_value() {
+  local env_name="$1"
+  local env_value
 
   if ! { : < /dev/tty > /dev/tty; } 2>/dev/null; then
-    echo "myCodex: ${env_name} is not set and ${secret_file} does not exist; cannot prompt without a tty." >&2
-    exit 2
+    echo "myCodex: ${env_name} is not set and no stored value exists; cannot prompt without a tty." >&2
+    return 2
   fi
-
-  mkdir -p "${secrets_dir}"
-  chmod 700 "${secrets_dir}"
-
   printf 'Enter %s: ' "${env_name}" > /dev/tty
   if ! IFS= read -r -s env_value < /dev/tty; then
     printf '\n' > /dev/tty
     echo "myCodex: failed to read ${env_name}." >&2
-    exit 2
+    return 2
   fi
   printf '\n' > /dev/tty
-
   if [[ -z "${env_value}" ]]; then
     echo "myCodex: ${env_name} cannot be empty." >&2
-    exit 2
+    return 2
   fi
 
-  old_umask="$(umask)"
-  umask 077
-  printf '%s\n' "${env_value}" > "${secret_file}"
-  umask "${old_umask}"
-  chmod 600 "${secret_file}"
-
-  export "${env_name}=${env_value}"
+  printf '%s' "${env_value}"
 }
 
 generate_litellm_proxy_key() {
@@ -129,15 +204,65 @@ generate_litellm_proxy_key() {
     exit 2
   fi
 
-  export LITELLM_MASTER_KEY="${proxy_key}"
+  printf '%s' "${proxy_key}"
+}
+
+resolve_secret_env() {
+  local env_name="$1"
+  local managed_name="$2"
+  local acquisition="$3"
+  local env_value="${!env_name-}"
+  local file_env_name="${env_name}_FILE"
+  local explicit_file="${!file_env_name-}"
+  local secrets_dir="${SCRIPT_DIR}/.secrets"
+  local secret_file="${secrets_dir}/${managed_name}"
+
+  if [[ -n "${env_value}" && -n "${explicit_file}" ]]; then
+    echo "myCodex: set only one of ${env_name} and ${file_env_name}." >&2
+    return 2
+  fi
+  if [[ -n "${env_value}" ]]; then
+    export "${env_name}=${env_value}"
+    return
+  fi
+  if [[ -n "${explicit_file}" ]]; then
+    env_value="$(read_secret_value "${env_name}" "${explicit_file}")"
+    export "${env_name}=${env_value}"
+    return
+  fi
+
+  if [[ -e "${secrets_dir}" || -L "${secrets_dir}" ]]; then
+    ensure_managed_secrets_dir "${env_name}" "${secrets_dir}"
+    if [[ -e "${secret_file}" || -L "${secret_file}" ]]; then
+      env_value="$(read_managed_secret_value "${env_name}" "${secret_file}")"
+      export "${env_name}=${env_value}"
+      return
+    fi
+  fi
+
+  case "${acquisition}" in
+    prompt)
+      env_value="$(prompt_secret_value "${env_name}")"
+      ;;
+    generate)
+      env_value="$(generate_litellm_proxy_key)"
+      ;;
+    *)
+      echo "myCodex: internal error: unknown secret acquisition policy ${acquisition}." >&2
+      return 2
+      ;;
+  esac
+  ensure_managed_secrets_dir "${env_name}" "${secrets_dir}"
+  env_value="$(persist_managed_secret_value "${env_name}" "${secret_file}" "${env_value}")"
+  export "${env_name}=${env_value}"
 }
 
 # Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
 # render Compose config without them (Compose prints a benign unset-var warning).
 case "${1:-}" in
   ""|up|start|restart)
-    ensure_secret_env OPENAI_API_KEY
-    generate_litellm_proxy_key
+    resolve_secret_env OPENAI_API_KEY openai_api_key prompt
+    resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
     ;;
 esac
 
