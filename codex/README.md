@@ -24,7 +24,8 @@ This does not make unsafe code safe, and it does not hide files that you place i
 - Bash 4.4 or newer. On macOS, install it with Homebrew; the launcher will use
   a compatible Bash from `$SHELL` automatically when `/usr/bin/env bash` finds
   the older system Bash.
-- An OpenAI API key, provided when prompted or through `OPENAI_API_KEY`.
+- An OpenAI API key, provided when prompted, through `OPENAI_API_KEY`, or
+  through `OPENAI_API_KEY_FILE`.
 
 ## How To Run It
 
@@ -35,15 +36,36 @@ cd /path/to/your/project
 /path/to/codex/myCodex
 ```
 
-On first run, `myCodex` asks for your `OPENAI_API_KEY` if it is not already set,
-stores the entered value under the recipe's `.secrets/`, creates an internal
-LiteLLM key, starts the stack, and attaches you to the Codex session. Values
-supplied through the environment are used without being copied to disk.
+On first run, `myCodex` asks for your `OPENAI_API_KEY` if no other source is
+configured, stores the entered value under the recipe's `.secrets/`, creates an
+internal LiteLLM key, starts the stack, and attaches you to the Codex session.
 
-The internal key is stored in `.secrets/litellm_master_key` with mode `0600`
-and reused. Keeping it stable prevents an unchanged `myCodex` invocation from
-recreating both containers. The `.secrets` directory is untracked recipe state,
-so `vaka get` updates preserve it.
+### Secret sources
+
+Each secret is resolved in this order:
+
+1. A direct environment value (`OPENAI_API_KEY` or `LITELLM_MASTER_KEY`).
+2. The file named by `OPENAI_API_KEY_FILE` or `LITELLM_MASTER_KEY_FILE`.
+3. Its managed file under the recipe's `.secrets/` directory.
+4. An interactive prompt for the provider key, or random generation for the
+   embedded LiteLLM key.
+
+Set either the direct value or its `_FILE` alternative, not both. Explicit file
+sources may be symlinks and are never copied, rewritten, or chmodded by
+`myCodex`; this supports files materialized by a secret manager.
+
+Managed storage is different: `.secrets` and the managed files beneath it must
+not be symlinks. This guards against a persistent accidental or planted link
+redirecting a managed secret read or write outside the recipe; it is not a
+privilege boundary against another process running as the same user. The
+directory is not shipped in the recipe archive; `myCodex` creates it with mode
+`0700` when needed and creates managed files with mode `0600`. Existing files
+and directories are not silently chmodded.
+
+The generated key is stored in `.secrets/litellm_master_key` and reused.
+Keeping it stable prevents an unchanged `myCodex` invocation from recreating
+both containers. The `.secrets` directory is untracked recipe state, so
+`vaka get` updates preserve it.
 
 Your project directory is mounted inside the container **at its own host path** (path parity), and that is the working directory. Only that directory is bind-mounted; files outside it are not shared with the container.
 
@@ -129,6 +151,20 @@ The pattern is the same: keep Codex blocked by default, give it access to a narr
 
 You can also relax `vaka.yaml` to allow Codex to reach specific hosts directly. That is possible but not recommended as the default: each extra allowed destination is another place a jailbroken or misled agent could send sensitive data.
 
+### Shared LiteLLM gateways
+
+The LiteLLM service in this recipe is an embedded sidecar owned by this Compose
+project. Its master key is an internal credential for that one gateway. Other
+recipes should not join its private network or reuse that master key: bringing
+this stack down would also remove their gateway, and sharing an administrative
+credential would couple their security boundaries.
+
+A future shared gateway should be a separate recipe with an independent
+lifecycle, a stable external Docker network and alias, and a separate client
+credential for each consumer. LiteLLM supports centralized gateway operation
+and virtual keys, but that topology is not implemented by this recipe. See the
+[LiteLLM proxy documentation](https://docs.litellm.ai/).
+
 ## Stopping The Stack
 
 From your project directory, run:
@@ -139,8 +175,10 @@ From your project directory, run:
 
 Starting it again reuses the existing LiteLLM proxy key. To rotate that internal
 key, bring the stack down, remove `.secrets/litellm_master_key` from the recipe
-directory, and start it again. A non-empty `LITELLM_MASTER_KEY` environment
-value overrides the stored key for that invocation and is never persisted.
+directory, and start it again. A non-empty `LITELLM_MASTER_KEY` or
+`LITELLM_MASTER_KEY_FILE` overrides the stored key for that invocation and is
+never persisted. Changing the selected key intentionally changes the Compose
+configuration and recreates both services on the next `up`.
 
 ## How It's Assembled
 
@@ -151,3 +189,15 @@ The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstre
 > The first `up` after upgrading from 0.2.2 or older establishes the persistent
 > LiteLLM key and may recreate both services once. Later invocations leave
 > unchanged containers in place.
+
+## Recipe Tests
+
+Codex-specific regressions live with the recipe rather than in registry-global
+validation. Maintainers can run them from the registry checkout with:
+
+```sh
+codex/tests/run.sh
+```
+
+The wrapper test is self-contained. The Compose rendering test additionally
+requires the Docker CLI with Compose.

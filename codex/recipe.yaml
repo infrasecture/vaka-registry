@@ -9,7 +9,7 @@ minVakaVersion: 0.0.3
 env:
   - name: OPENAI_API_KEY
     required: true
-    description: Model provider API key, consumed only by the LiteLLM gateway (the agent container never sees it)
+    description: Model provider API key consumed only by LiteLLM; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely
   - name: LITELLM_MASTER_KEY
     required: false
-    description: Optional override for the persistent internal key generated automatically by myCodex
+    description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE or generates and persists one
