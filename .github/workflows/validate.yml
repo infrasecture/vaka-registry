@@ -25,11 +25,6 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install pyyaml
 
-      - name: Test Codex recipe regressions
-        run: |
-          bash scripts/test_codex_wrapper.sh
-          python3 scripts/test_codex_compose.py
-
       - name: Check out vaka source
         uses: actions/checkout@v4
         with:

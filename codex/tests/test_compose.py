@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Regression checks for rendered orchestration invariants."""
+"""Regression checks for rendered Codex orchestration invariants."""
 
 import json
 import os
 from pathlib import Path
 import subprocess
 
-root = Path(__file__).resolve().parent.parent
-recipe_dir = root / "codex"
+recipe_dir = Path(__file__).resolve().parent.parent
 env = os.environ.copy()
 env.setdefault("OPENAI_API_KEY", "test-provider-key")
 env.setdefault("LITELLM_MASTER_KEY", "test-proxy-key")
