@@ -15,13 +15,22 @@ set -euo pipefail
 codex_home="${CODEX_HOME:-${MYCODEX_CODEX_HOME:-/home/codex/.codex}}"
 config_file="${codex_home}/config.toml"
 tmp_file="${config_file}.tmp.$$"
+# Optional model pin. Auth profiles that enumerate specific models set this so
+# Codex requests a model the gateway serves; the default profile leaves it empty
+# and relies on LiteLLM's wildcard.
+model="${MYCODEX_MODEL:-}"
 
 mkdir -p "${codex_home}"
 touch "${config_file}"
 
-awk '
+awk -v model="${model}" '
   function is_table(line) {
     return line ~ /^[[:space:]]*\[[^]]+\][[:space:]]*([#].*)?$/
+  }
+  function toml_escape(value) {
+    gsub(/\\/, "\\\\", value)
+    gsub(/"/, "\\\"", value)
+    return value
   }
 
   # Drop our managed provider table (until the next table header or EOF).
@@ -32,9 +41,10 @@ awk '
   skip_managed_block && is_table($0) { skip_managed_block = 0 }
   skip_managed_block { next }
 
-  # Drop any prior top-level model_provider line (before the first table).
+  # Drop any prior top-level model_provider / model line (before the first table).
   is_table($0) { in_table = 1 }
   !in_table && /^[[:space:]]*model_provider[[:space:]]*=/ { next }
+  !in_table && /^[[:space:]]*model[[:space:]]*=/ { next }
 
   # Buffer everything else so the output can be reassembled deterministically.
   { buf[n++] = $0 }
@@ -44,6 +54,7 @@ awk '
     while (n > 0 && buf[n - 1] ~ /^[[:space:]]*$/) { n-- }
 
     print "model_provider = \"litellm\""
+    if (model != "") { print "model = \"" toml_escape(model) "\"" }
     for (i = 0; i < n; i++) { print buf[i] }
     print ""
     print "[model_providers.litellm]"

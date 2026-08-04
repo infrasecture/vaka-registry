@@ -37,6 +37,10 @@ services:
       CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
       CODEX_BYOBU_SESSION: codex
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
+      # Optional model pin for codex-prestart.sh. Empty in the default (openai)
+      # profile, where LiteLLM serves any model via a wildcard; auth profiles that
+      # enumerate specific models set it so Codex requests one the gateway serves.
+      MYCODEX_MODEL: ${MYCODEX_MODEL:-}
       # The agent reaches the model only through the LiteLLM sidecar; this is
       # the internal proxy key, never the upstream provider key.
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
@@ -64,7 +68,9 @@ services:
       LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
       OTEL_SDK_DISABLED: "true"
     volumes:
-      - ./litellm.config.yaml:/app/config.yaml:ro
+      # Default resolves to the openai config; auth profiles point this at their
+      # own provider config via MYCODEX_LITELLM_CONFIG (set by ./myCodex).
+      - ${MYCODEX_LITELLM_CONFIG:-./litellm.config.yaml}:/app/config.yaml:ro
     expose:
       - "4000"
 

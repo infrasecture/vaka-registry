@@ -257,17 +257,225 @@ resolve_secret_env() {
   export "${env_name}=${env_value}"
 }
 
-# Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
-# render Compose config without them (Compose prints a benign unset-var warning).
-case "${1:-}" in
-  ""|up|start|restart)
-    resolve_secret_env OPENAI_API_KEY openai_api_key prompt
-    resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
-    ;;
-esac
+die() {
+  echo "myCodex: $*" >&2
+  exit 2
+}
 
-# Route every Compose invocation the launcher makes through vaka's egress policy.
-export MYCODEX_COMPOSE="vaka --vaka-file=${SCRIPT_DIR}/vaka.yaml compose"
+# ---------------------------------------------------------------------------
+# Auth profiles
+#
+# MYCODEX_AUTH selects how the LiteLLM sidecar authenticates upstream. The agent
+# container is auth-agnostic — it always speaks to the sidecar with the internal
+# proxy key — so only the sidecar's provider config, credential, and egress
+# change between profiles.
+#
+# The default profile "openai" is realized by the recipe's root files
+# (docker-compose.yaml, vaka.yaml, litellm.config.yaml) and needs no overlay, so
+# it stays exactly the artifact validated by registry CI. Every other profile is
+# data under auth-profiles/<id>/: profile.env (manifest), overlay.yaml (compose
+# overlay), litellm.config.yaml, and vaka.yaml (a complete egress policy).
+# ---------------------------------------------------------------------------
+
+MYCODEX_AUTH="${MYCODEX_AUTH:-openai}"
+
+# Profile fields; defaults describe the built-in "openai" profile.
+PROFILE_VAKA_FILE="${SCRIPT_DIR}/vaka.yaml"
+PROFILE_OVERLAY=""
+PROFILE_LITELLM_CONFIG=""
+CREDENTIAL_KIND="env-secret"
+PROFILE_SECRET_ENV="OPENAI_API_KEY"
+PROFILE_SECRET_MANAGED="openai_api_key"
+PROFILE_CREDENTIAL_ENV=""
+PROFILE_DEFAULT_MODEL=""
+PROFILE_LOGIN_KIND="none"
+
+validate_profile_id() {
+  case "$1" in
+    ''|.|..|*[!a-z0-9._-]*)
+      die "invalid MYCODEX_AUTH profile id: '$1'"
+      ;;
+  esac
+}
+
+resolve_auth_profile() {
+  [[ "${MYCODEX_AUTH}" == "openai" ]] && return
+
+  validate_profile_id "${MYCODEX_AUTH}"
+  local dir="${SCRIPT_DIR}/auth-profiles/${MYCODEX_AUTH}"
+  local manifest="${dir}/profile.env"
+  [[ -f "${manifest}" ]] || die "unknown auth profile '${MYCODEX_AUTH}' (expected ${manifest})"
+
+  # profile.env is trusted recipe content (like bin/lib/mycodex-image.sh). Reset
+  # the fields it may set, then source it.
+  CREDENTIAL_KIND=""
+  PROFILE_SECRET_ENV=""
+  PROFILE_SECRET_MANAGED=""
+  PROFILE_CREDENTIAL_ENV=""
+  PROFILE_DEFAULT_MODEL=""
+  PROFILE_LOGIN_KIND="none"
+  # shellcheck disable=SC1090
+  source "${manifest}"
+
+  PROFILE_VAKA_FILE="${dir}/vaka.yaml"
+  PROFILE_OVERLAY="${dir}/overlay.yaml"
+  [[ -f "${PROFILE_VAKA_FILE}" ]] || die "auth profile '${MYCODEX_AUTH}' is missing vaka.yaml"
+  [[ -f "${PROFILE_OVERLAY}" ]] || die "auth profile '${MYCODEX_AUTH}' is missing overlay.yaml"
+  [[ -n "${CREDENTIAL_KIND}" ]] || die "auth profile '${MYCODEX_AUTH}' does not set CREDENTIAL_KIND"
+  if [[ -f "${dir}/litellm.config.yaml" ]]; then
+    # Compose resolves relative bind sources against the project directory (the
+    # base compose file's dir, i.e. the recipe root), so keep this repo-relative.
+    PROFILE_LITELLM_CONFIG="./auth-profiles/${MYCODEX_AUTH}/litellm.config.yaml"
+  fi
+}
+
+# The oauth-device-native token dir is bind-mounted rw into the sidecar; create
+# it (0700) up front so Docker does not create it root-owned on first `up`.
+ensure_chatgpt_token_dir() {
+  ensure_managed_secrets_dir "MYCODEX_AUTH" "${SCRIPT_DIR}/.secrets" || exit $?
+  local dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
+  [[ -d "${dir}" ]] && return
+  (umask 077 && mkdir -p -- "${dir}") || die "failed to create ${dir}"
+}
+
+# credential-file kind: PROFILE_CREDENTIAL_ENV names a host env var whose value
+# is a path to a credential file (e.g. a GCP service-account JSON). The wrapper
+# never reads or copies the file; it exports MYCODEX_CREDENTIAL_FILE (an absolute
+# path) for the profile overlay to bind read-only into the sidecar.
+resolve_credential_file() {
+  local var="${PROFILE_CREDENTIAL_ENV}"
+  [[ -n "${var}" ]] || die "profile '${MYCODEX_AUTH}': credential-file kind requires PROFILE_CREDENTIAL_ENV"
+  local path="${!var-}"
+  [[ -n "${path}" ]] || die "set ${var} to the path of the ${MYCODEX_AUTH} credential file"
+  [[ -f "${path}" ]] || die "${var}: ${path} must be a readable regular file"
+  local abs
+  abs="$(cd -- "$(dirname -- "${path}")" >/dev/null 2>&1 && printf '%s/%s' "$(pwd -P)" "$(basename -- "${path}")")" \
+    || die "cannot resolve ${var}=${path}"
+  export MYCODEX_CREDENTIAL_FILE="${abs}"
+}
+
+# Acquire everything the selected profile needs to (re)create the stack. The
+# agent<->gateway proxy key is minted and persisted for every profile.
+acquire_credentials() {
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      [[ -n "${PROFILE_SECRET_ENV}" && -n "${PROFILE_SECRET_MANAGED}" ]] \
+        || die "profile '${MYCODEX_AUTH}': env-secret kind requires PROFILE_SECRET_ENV and PROFILE_SECRET_MANAGED"
+      resolve_secret_env "${PROFILE_SECRET_ENV}" "${PROFILE_SECRET_MANAGED}" prompt
+      ;;
+    oauth-device-native)
+      ensure_chatgpt_token_dir
+      ;;
+    credential-file)
+      resolve_credential_file
+      ;;
+    *)
+      die "profile '${MYCODEX_AUTH}': unknown CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+  resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
+}
+
+# Import a pre-existing ChatGPT auth.json into the sidecar token dir, normalizing
+# Codex's nested `tokens` layout to the top-level fields LiteLLM's chatgpt/
+# provider expects (mirrors isec's NormalizeChatGPTAuth).
+import_chatgpt_auth() {
+  local src="$1" dst="$2"
+  [[ -f "${src}" ]] || die "MYCODEX_CHATGPT_AUTH: ${src} is not a readable file"
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 is required to import MYCODEX_CHATGPT_AUTH; otherwise use the interactive login"
+  ensure_chatgpt_token_dir
+  python3 - "${src}" "${dst}" <<'PY'
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+raw = json.load(open(src))
+if isinstance(raw.get("access_token"), str):
+    out = raw
+else:
+    tokens = raw.get("tokens") or {}
+    out = {k: tokens[k] for k in ("access_token", "refresh_token", "id_token", "account_id")
+           if isinstance(tokens.get(k), str) and tokens[k]}
+    for k in ("auth_mode", "last_refresh"):
+        if k in raw:
+            out[k] = raw[k]
+if not isinstance(out.get("access_token"), str) or not out["access_token"]:
+    sys.exit("MYCODEX_CHATGPT_AUTH: no access_token found to import")
+fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(out, f, indent=2)
+PY
+}
+
+launcher() {
+  "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"
+}
+
+# `myCodex login` primes the selected profile's credential. For env-secret /
+# credential-file this just resolves and stores the input; for oauth-device-native
+# it surfaces LiteLLM's own device flow (which mints and later refreshes the
+# token) or imports an existing auth.json via MYCODEX_CHATGPT_AUTH.
+run_login() {
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      acquire_credentials
+      echo "myCodex: profile '${MYCODEX_AUTH}' stores an API key; nothing else to do." >&2
+      ;;
+    credential-file)
+      acquire_credentials
+      echo "myCodex: profile '${MYCODEX_AUTH}' uses credential file ${MYCODEX_CREDENTIAL_FILE}." >&2
+      ;;
+    oauth-device-native)
+      run_oauth_device_login "$@"
+      ;;
+    *)
+      die "login is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+}
+
+run_oauth_device_login() {
+  acquire_credentials
+  local token_dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
+  local token_file="${token_dir}/auth.json"
+
+  if [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
+    import_chatgpt_auth "${MYCODEX_CHATGPT_AUTH}" "${token_file}"
+    echo "myCodex: imported ChatGPT auth into ${token_file}." >&2
+    return
+  fi
+
+  echo "myCodex: starting the LiteLLM ChatGPT device login." >&2
+  echo "myCodex: a verification URL and code will appear below — open the URL," >&2
+  echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
+
+  launcher up -d || die "failed to start the stack for login"
+  launcher logs -f litellm &
+  local log_pid=$!
+
+  # One probe triggers the provider's device flow. Failures are expected until
+  # the browser step completes, so never let it abort the login.
+  local model="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL:-gpt-5.3-codex}}"
+  launcher exec bash -lc \
+    'curl -sS -m 600 http://litellm:4000/v1/responses \
+       -H "Authorization: Bearer ${OPENAI_API_KEY}" -H "Content-Type: application/json" \
+       -d '"'"'{"model":"'"${model}"'","input":"login probe"}'"'"' >/dev/null 2>&1 || true' \
+    2>/dev/null || true
+
+  local waited=0
+  while [[ ! -s "${token_file}" ]]; do
+    sleep 2
+    waited=$((waited + 2))
+    if (( waited >= 600 )); then
+      kill "${log_pid}" 2>/dev/null || true
+      die "timed out waiting for ${token_file}; finish the browser step and rerun 'myCodex login'"
+    fi
+  done
+
+  kill "${log_pid}" 2>/dev/null || true
+  echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
+}
+
+resolve_auth_profile
 
 # Default to a per-project Codex state volume: it isolates each project's codex
 # home/state and sidesteps the ownership drift a shared, long-lived home volume
@@ -278,4 +486,36 @@ if [[ "${MYCODEX_SHARED_STATE:-0}" != "1" ]]; then
   private_env=(--private-env)
 fi
 
-exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "$@"
+# Inject the profile's compose overlay ahead of the subcommand so the vendored
+# launcher folds it in via its own -f handling.
+profile_files=()
+if [[ -n "${PROFILE_OVERLAY}" ]]; then
+  profile_files=(-f "${PROFILE_OVERLAY}")
+fi
+
+# Route every Compose invocation the launcher makes through the profile's egress
+# policy, and point the sidecar at the profile's provider config / model.
+export MYCODEX_COMPOSE="vaka --vaka-file=${PROFILE_VAKA_FILE} compose"
+if [[ -n "${PROFILE_LITELLM_CONFIG}" ]]; then
+  export MYCODEX_LITELLM_CONFIG="${PROFILE_LITELLM_CONFIG}"
+fi
+if [[ -n "${MYCODEX_MODEL:-}" || -n "${PROFILE_DEFAULT_MODEL}" ]]; then
+  export MYCODEX_MODEL="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL}}"
+fi
+
+# `login` is a recipe-level convenience, not a Compose verb; handle it here.
+if [[ "${1:-}" == "login" ]]; then
+  shift || true
+  run_login "$@"
+  exit $?
+fi
+
+# Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
+# render Compose config without them (Compose prints a benign unset-var warning).
+case "${1:-}" in
+  ""|up|start|restart)
+    acquire_credentials
+    ;;
+esac
+
+exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"

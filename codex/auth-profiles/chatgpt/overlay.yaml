@@ -1,0 +1,15 @@
+# Compose overlay for the ChatGPT-subscription profile. Additive over
+# docker-compose.yaml: it only teaches the LiteLLM sidecar where to keep the
+# OAuth token. The provider config swap and the model pin are driven by ./myCodex
+# via MYCODEX_LITELLM_CONFIG and MYCODEX_MODEL, so nothing here touches the agent.
+#
+# NOTE: the chatgpt/ provider requires a LiteLLM build that includes it. If the
+# pinned base image predates it, pin a chatgpt-capable image here by digest.
+services:
+  litellm:
+    environment:
+      CHATGPT_TOKEN_DIR: /var/lib/litellm/chatgpt-token
+      CHATGPT_AUTH_FILE: auth.json
+    volumes:
+      # rw so LiteLLM can mint the token during device login and refresh it later.
+      - ./.secrets/chatgpt-token:/var/lib/litellm/chatgpt-token:rw

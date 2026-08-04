@@ -1,0 +1,21 @@
+# LiteLLM config for the ChatGPT-subscription profile. Routes are chatgpt/<model>
+# on the Responses API; LiteLLM reads/refreshes the OAuth token from
+# CHATGPT_TOKEN_DIR/auth.json (set by overlay.yaml). Models are enumerated
+# because the chatgpt/ provider does not support a wildcard route; the
+# model_name each client requests must appear here.
+model_list:
+  - model_name: gpt-5.3-codex
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-5.3-codex
+  - model_name: gpt-5.4
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-5.4
+
+litellm_settings:
+  telemetry: False
+  drop_params: True
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

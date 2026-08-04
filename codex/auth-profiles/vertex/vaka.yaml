@@ -1,0 +1,35 @@
+apiVersion: agent.vaka/v1alpha1
+kind: ServicePolicy
+
+services:
+  codex:
+    network:
+      egress:
+        defaultAction: reject       # accept | reject | drop
+        accept:
+          - dns: {}  # all entries from /etc/resolv.conf
+          - proto: tcp
+            to: [litellm]
+            ports: [4000]
+        drop:
+          - proto: icmp
+            type: echo-request      # named or numeric (8)
+  litellm:
+    network:
+      egress:
+        defaultAction: reject
+        accept:
+          - dns: {}
+          # Vertex AI (SCAFFOLD). The location-specific aiplatform host must match
+          # VERTEXAI_LOCATION; add more regional hosts as needed.
+          - proto: tcp
+            to: [
+                oauth2.googleapis.com,
+                aiplatform.googleapis.com,
+                us-central1-aiplatform.googleapis.com,
+                www.googleapis.com,
+                storage.googleapis.com,
+                ]
+            ports: [443]
+          - proto: icmp
+            type: echo-request

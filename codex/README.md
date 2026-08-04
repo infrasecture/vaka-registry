@@ -97,6 +97,44 @@ Each project directory gets its **own** Codex state volume (home, config, histor
 MYCODEX_SHARED_STATE=1 /path/to/codex/myCodex
 ```
 
+## Authentication Profiles
+
+`MYCODEX_AUTH` selects how the LiteLLM sidecar authenticates to the model
+provider. The agent container is unaffected by the choice — it always reaches the
+model only through the sidecar with the internal proxy key — so switching
+profiles never widens what the agent itself can reach.
+
+| Profile | Upstream auth | How you provide it |
+| --- | --- | --- |
+| `openai` (default) | OpenAI API key | `OPENAI_API_KEY` (prompt / env / `_FILE`) |
+| `chatgpt` | ChatGPT subscription (OAuth) | `myCodex login` — one-time device login |
+| `vertex` (scaffold) | Google Vertex AI service account | `MYCODEX_VERTEX_CREDENTIALS=/path/to/sa.json` + `VERTEXAI_PROJECT` |
+
+Each non-default profile lives under `auth-profiles/<id>/` as data — a compose
+overlay, a LiteLLM config, and its own egress policy whose agent block is
+identical to the default (only the sidecar's upstream hosts change). Adding a new
+API-key provider (e.g. Anthropic) is a new profile directory with no wrapper
+changes.
+
+### ChatGPT subscription
+
+```sh
+MYCODEX_AUTH=chatgpt /path/to/codex/myCodex login   # one-time; opens a device login
+MYCODEX_AUTH=chatgpt /path/to/codex/myCodex          # then run as usual
+```
+
+`login` surfaces LiteLLM's own OAuth device flow: it prints a URL and a code —
+open the URL, sign in, enter the code. LiteLLM stores the token under the recipe's
+`.secrets/chatgpt-token/` (mounted only into the sidecar, never the agent) and
+refreshes it automatically thereafter. If you already have a Codex
+`~/.codex/auth.json`, import it instead with
+`MYCODEX_CHATGPT_AUTH=~/.codex/auth.json MYCODEX_AUTH=chatgpt ./myCodex login`.
+
+> The `chatgpt` and `vertex` profiles are new and depend on provider-side
+> behavior (LiteLLM's `chatgpt/` provider and a chatgpt-capable image; a real
+> Vertex project). Verify them in your environment before relying on them; the
+> default `openai` profile is unchanged.
+
 ## How The Network Boundary Works
 
 The Codex container has a strict vaka egress policy (`vaka.yaml`):
@@ -206,5 +244,8 @@ validation. Maintainers can run them from the registry checkout with:
 codex/tests/run.sh
 ```
 
-The wrapper test is self-contained. The Compose rendering test additionally
-requires the Docker CLI with Compose.
+The wrapper and profile tests are self-contained (`test_wrapper.sh` covers secret
+resolution; `test_profiles.sh` covers auth-profile dispatch, the identical-agent-
+egress invariant across every profile policy, and the credential handlers). The
+Compose rendering test (`test_compose.py`, which also renders the profile
+overlays) additionally requires the Docker CLI with Compose.
