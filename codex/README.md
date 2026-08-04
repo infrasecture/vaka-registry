@@ -133,6 +133,13 @@ It does not solve:
 - Trust decisions about code the agent writes for you.
 - All possible Docker, host, or kernel escape risks.
 
+The Codex workstation image uses the bundled Codex version tag (currently
+`0.146.0`) instead of a manifest-list digest. This lets Docker select the
+native platform image consistently on Linux and VM-backed macOS engines such
+as Colima. The tag can advance to a newer workstation image revision that
+still bundles the same Codex version; it does not track a different Codex
+version. The LiteLLM image remains digest-pinned.
+
 Treat the project directory as the allowed blast radius. Put only the project files the agent needs there, and keep unrelated secrets outside it.
 
 ## Extending The Setup
