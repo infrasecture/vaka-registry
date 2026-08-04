@@ -20,6 +20,14 @@ render = subprocess.run(
 )
 compose = json.loads(render.stdout)
 
+codex_image = compose.get("services", {}).get("codex", {}).get("image")
+expected_codex_image = "ghcr.io/infrasecture/harness-workstation:0.146.0"
+if codex_image != expected_codex_image:
+    raise SystemExit(
+        f"FAIL: codex image is {codex_image!r}, want SemVer reference "
+        f"{expected_codex_image!r} without a digest pin"
+    )
+
 try:
     condition = compose["services"]["codex"]["depends_on"]["litellm"]["condition"]
 except (KeyError, TypeError) as exc:
@@ -32,4 +40,4 @@ if condition != "service_started":
         f"FAIL: codex -> litellm dependency is {condition!r}, want 'service_started'"
     )
 
-print("PASS: codex waits for the litellm service to start")
+print("PASS: codex uses a SemVer image and waits for LiteLLM to start")

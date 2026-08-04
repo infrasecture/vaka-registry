@@ -6,7 +6,7 @@
 # `docker compose`.
 services:
   codex:
-    image: ghcr.io/infrasecture/harness-workstation:0.146.0@sha256:d32d807ed7f2090408e22cc1f16cbd640f8fbbbf970d0b6ccddcb4075974d590
+    image: ghcr.io/infrasecture/harness-workstation:0.146.0
     # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
     # vaka never inspects the image to recover them. The entrypoint starts as
     # root and drops to the host user itself via gosu, so the service runs as
