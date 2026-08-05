@@ -270,7 +270,7 @@ die() {
 # auth-agnostic: it always speaks to the sidecar with the internal proxy key, so
 # only the sidecar's provider config, credential, and egress change.
 #
-# The default profile "openai" is realized by the recipe's root files
+# The built-in profile "openai" is realized by the recipe's root files
 # (docker-compose.yaml, vaka.yaml, litellm.config.yaml) and needs no overlay, so
 # it stays exactly the artifact validated by registry CI. Every other profile is
 # data under auth-profiles/<id>/: profile.env (manifest), overlay.yaml (compose
@@ -361,14 +361,26 @@ clear_persisted_auth_profile() {
 }
 
 available_auth_profiles() {
-  local dir
+  local dir profile
+
+  # Put the browser-based subscription flow first during onboarding, keep the
+  # built-in API-key profile second, then append future recipe profiles.
+  if [[ -f "${SCRIPT_DIR}/auth-profiles/chatgpt/profile.env" ]]; then
+    printf '%s\n' chatgpt
+  fi
   printf '%s\n' openai
   shopt -s nullglob
   for dir in "${SCRIPT_DIR}"/auth-profiles/*; do
     [[ -f "${dir}/profile.env" ]] || continue
-    basename -- "${dir}"
+    profile="$(basename -- "${dir}")"
+    [[ "${profile}" == "chatgpt" || "${profile}" == "openai" ]] && continue
+    printf '%s\n' "${profile}"
   done
   shopt -u nullglob
+}
+
+has_controlling_tty() {
+  { : < /dev/tty > /dev/tty; } 2>/dev/null
 }
 
 auth_profile_display_name() (
@@ -400,7 +412,7 @@ select_auth_profile_interactively() {
   local profiles=()
   local choice profile index
 
-  if ! { : < /dev/tty > /dev/tty; } 2>/dev/null; then
+  if ! has_controlling_tty; then
     echo "myCodex: no authentication profile is selected; specify one explicitly:" >&2
     echo "  myCodex login <profile>" >&2
     echo "myCodex: available profiles:" >&2
@@ -409,14 +421,15 @@ select_auth_profile_interactively() {
   fi
 
   mapfile -t profiles < <(available_auth_profiles)
-  printf 'Select an authentication profile:\n' > /dev/tty
+  printf 'Choose how myCodex should authenticate:\n' > /dev/tty
   for index in "${!profiles[@]}"; do
     profile="${profiles[index]}"
     printf '  %d) %-12s %s\n' "$((index + 1))" "${profile}" \
       "$(auth_profile_display_name "${profile}")" > /dev/tty
   done
-  printf 'Profile: ' > /dev/tty
+  printf 'Profile [1]: ' > /dev/tty
   IFS= read -r choice < /dev/tty || return 130
+  [[ -n "${choice}" ]] || choice=1
 
   if [[ "${choice}" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#profiles[@]} )); then
     printf '%s' "${profiles[choice - 1]}"
@@ -681,6 +694,24 @@ run_auth_status() {
   else
     printf 'Running profile: none for this project\n'
   fi
+}
+
+run_unselected_auth_status() {
+  local running
+
+  printf 'Selected profile: none\n'
+  printf 'Authentication:  choose a profile with myCodex login\n'
+  if running="$(running_auth_profile)" && [[ -n "${running}" ]]; then
+    printf 'Running profile: %s\n' "${running}"
+  else
+    printf 'Running profile: none for this project\n'
+  fi
+}
+
+has_openai_credential_source() {
+  local managed_file="${SCRIPT_DIR}/.secrets/openai_api_key"
+  [[ -n "${OPENAI_API_KEY-}" || -n "${OPENAI_API_KEY_FILE-}" \
+      || -e "${managed_file}" || -L "${managed_file}" ]]
 }
 
 run_auth_list() {
@@ -1157,22 +1188,27 @@ if [[ -n "${auth_option}" && -n "${auth_command_profile}" \
   die "conflicting auth profiles: --auth=${auth_option} and ${auth_command} ${auth_command_profile}"
 fi
 
+auth_profile_selected=0
 login_should_persist=0
 if [[ -n "${auth_command_profile}" ]]; then
   MYCODEX_AUTH="${auth_command_profile}"
   AUTH_SELECTION_SOURCE="command line"
+  auth_profile_selected=1
   [[ "${auth_command}" == "login" ]] && login_should_persist=1
 elif [[ -n "${auth_option}" ]]; then
   MYCODEX_AUTH="${auth_option}"
   AUTH_SELECTION_SOURCE="--auth override"
+  auth_profile_selected=1
 elif [[ -n "${MYCODEX_AUTH-}" ]]; then
   AUTH_SELECTION_SOURCE="MYCODEX_AUTH override"
+  auth_profile_selected=1
 elif [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]]; then
   MYCODEX_AUTH="$(read_persisted_auth_profile)"
   AUTH_SELECTION_SOURCE="persisted"
+  auth_profile_selected=1
 else
-  MYCODEX_AUTH="openai"
-  AUTH_SELECTION_SOURCE="default"
+  MYCODEX_AUTH=""
+  AUTH_SELECTION_SOURCE="not selected"
 fi
 
 case "${auth_command}" in
@@ -1181,9 +1217,10 @@ case "${auth_command}" in
       print_wrapper_auth_help
       exit 0
     fi
-    if [[ -z "${auth_command_profile}" && "${AUTH_SELECTION_SOURCE}" == "default" ]]; then
+    if (( ! auth_profile_selected )); then
       MYCODEX_AUTH="$(select_auth_profile_interactively)"
       AUTH_SELECTION_SOURCE="interactive selection"
+      auth_profile_selected=1
       login_should_persist=1
     fi
     ;;
@@ -1194,6 +1231,78 @@ case "${auth_command}" in
     fi
     ;;
 esac
+
+# Commands which do not need a selected profile are handled before profile
+# resolution. This keeps help and status useful during first-run onboarding.
+if (( ! auth_profile_selected )); then
+  case "${auth_command}" in
+    auth)
+      case "${2:-status}" in
+        status)
+          [[ $# -le 2 ]] || die "auth status accepts no arguments"
+          run_unselected_auth_status
+          ;;
+        list)
+          [[ $# -le 2 ]] || die "auth list accepts no arguments"
+          run_auth_list
+          ;;
+        *)
+          die "unknown auth command '${2}'; expected status or list"
+          ;;
+      esac
+      exit 0
+      ;;
+    logout)
+      die "no authentication profile is selected; specify 'logout <profile>'"
+      ;;
+    help|-h|--help)
+      # The built-in profile has no overlay and is sufficient to render help.
+      MYCODEX_AUTH="openai"
+      AUTH_SELECTION_SOURCE="help fallback"
+      auth_profile_selected=1
+      ;;
+    *)
+      running_profile="$(running_auth_profile || true)"
+      if [[ -n "${running_profile}" ]]; then
+        MYCODEX_AUTH="${running_profile}"
+        AUTH_SELECTION_SOURCE="running container"
+        auth_profile_selected=1
+      fi
+      ;;
+  esac
+fi
+
+startup_should_authenticate=0
+startup_credentials_ready=0
+if (( ! auth_profile_selected )); then
+  case "${1:-}" in
+    ""|up|start|restart)
+      if has_controlling_tty; then
+        MYCODEX_AUTH="$(select_auth_profile_interactively)"
+        AUTH_SELECTION_SOURCE="interactive first-run selection"
+        auth_profile_selected=1
+        startup_should_authenticate=1
+      elif has_openai_credential_source; then
+        # Preserve scripts and upgraded installations that already provide the
+        # historical OpenAI credential, but do not persist an implicit choice.
+        MYCODEX_AUTH="openai"
+        AUTH_SELECTION_SOURCE="detected OpenAI credential"
+        auth_profile_selected=1
+      else
+        die "no authentication profile is selected and input is not a terminal.
+myCodex: run '${SCRIPT_DIR}/myCodex login <profile>' once, or use --auth/MYCODEX_AUTH for this invocation"
+      fi
+      ;;
+    *)
+      # Before profiles existed every non-starting command addressed the root
+      # OpenAI Compose definition. Retain that migration behavior when there is
+      # no labeled running container and do not store it as a new preference.
+      MYCODEX_AUTH="openai"
+      AUTH_SELECTION_SOURCE="legacy command fallback"
+      auth_profile_selected=1
+      ;;
+  esac
+fi
 
 # Exported so Compose can stamp the selected profile as a container label.
 validate_profile_id "${MYCODEX_AUTH}"
@@ -1271,6 +1380,13 @@ case "${auth_command}" in
     ;;
 esac
 
+if (( startup_should_authenticate )); then
+  run_login
+  persist_auth_profile "${MYCODEX_AUTH}"
+  echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+  startup_credentials_ready=1
+fi
+
 # Refuse to "activate" a profile that differs from the one already running when
 # the verb cannot recreate containers to apply it. `up` is exempt: it recreates,
 # and is the documented way to switch.
@@ -1284,7 +1400,7 @@ esac
 # render Compose config without them (Compose prints a benign unset-var warning).
 case "${1:-}" in
   ""|up|start|restart)
-    acquire_credentials
+    (( startup_credentials_ready )) || acquire_credentials
     ;;
 esac
 
