@@ -277,8 +277,11 @@ die() {
 # overlay), litellm.config.yaml, and vaka.yaml (a complete egress policy).
 # ---------------------------------------------------------------------------
 
-# Exported so Compose can stamp it as a container label (see docker-compose.yaml).
-export MYCODEX_AUTH="${MYCODEX_AUTH:-openai}"
+# The selected profile is non-secret recipe state. Keeping it beside the managed
+# credentials gives it the same update-preserved lifecycle without introducing a
+# second state directory.
+AUTH_PROFILE_FILE="${SCRIPT_DIR}/.secrets/auth_profile"
+AUTH_SELECTION_SOURCE=""
 
 # The launcher derives the codex container name deterministically from the
 # caller directory; replicate it so we can inspect a running stack's profile.
@@ -296,6 +299,7 @@ PROFILE_SECRET_ENV="OPENAI_API_KEY"
 PROFILE_SECRET_MANAGED="openai_api_key"
 PROFILE_CREDENTIAL_ENV=""
 PROFILE_DEFAULT_MODEL=""
+PROFILE_DISPLAY_NAME="OpenAI API key"
 
 validate_profile_id() {
   case "$1" in
@@ -303,6 +307,129 @@ validate_profile_id() {
       die "invalid MYCODEX_AUTH profile id: '$1'"
       ;;
   esac
+}
+
+read_persisted_auth_profile() {
+  local value _extra
+
+  [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]] || return 1
+  [[ ! -L "${AUTH_PROFILE_FILE}" && -f "${AUTH_PROFILE_FILE}" ]] \
+    || die "${AUTH_PROFILE_FILE} must be a managed regular file, not a symlink or other file"
+
+  {
+    IFS= read -r value || [[ -n "${value}" ]] \
+      || die "${AUTH_PROFILE_FILE} is empty"
+    if IFS= read -r _extra; then
+      die "${AUTH_PROFILE_FILE} must contain exactly one profile id"
+    fi
+  } < "${AUTH_PROFILE_FILE}"
+
+  validate_profile_id "${value}"
+  printf '%s' "${value}"
+}
+
+persist_auth_profile() {
+  local profile="$1"
+  local temp_file
+
+  validate_profile_id "${profile}"
+  ensure_managed_secrets_dir "MYCODEX_AUTH" "${SCRIPT_DIR}/.secrets" || exit $?
+  if [[ -L "${AUTH_PROFILE_FILE}" || ( -e "${AUTH_PROFILE_FILE}" && ! -f "${AUTH_PROFILE_FILE}" ) ]]; then
+    die "${AUTH_PROFILE_FILE} must be a managed regular file, not a symlink or other file"
+  fi
+
+  temp_file="$(mktemp "${SCRIPT_DIR}/.secrets/.auth_profile.XXXXXX")" \
+    || die "failed to create a temporary auth-profile file"
+  chmod 600 "${temp_file}"
+  if ! printf '%s\n' "${profile}" > "${temp_file}"; then
+    rm -f -- "${temp_file}"
+    die "failed to write the selected auth profile"
+  fi
+  if ! command mv -f "${temp_file}" "${AUTH_PROFILE_FILE}"; then
+    rm -f -- "${temp_file}"
+    die "failed to persist the selected auth profile"
+  fi
+}
+
+clear_persisted_auth_profile() {
+  local selected
+
+  [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]] || return 0
+  selected="$(read_persisted_auth_profile)"
+  [[ "${selected}" == "$1" ]] || return 0
+  rm -f -- "${AUTH_PROFILE_FILE}" || die "failed to clear ${AUTH_PROFILE_FILE}"
+}
+
+available_auth_profiles() {
+  local dir
+  printf '%s\n' openai
+  shopt -s nullglob
+  for dir in "${SCRIPT_DIR}"/auth-profiles/*; do
+    [[ -f "${dir}/profile.env" ]] || continue
+    basename -- "${dir}"
+  done
+  shopt -u nullglob
+}
+
+auth_profile_display_name() (
+  local profile="$1"
+  local manifest
+
+  if [[ "${profile}" == "openai" ]]; then
+    printf '%s' "OpenAI API key"
+    return
+  fi
+
+  manifest="${SCRIPT_DIR}/auth-profiles/${profile}/profile.env"
+  PROFILE_DISPLAY_NAME="${profile}"
+  # profile.env is trusted recipe content, just as it is during normal profile
+  # resolution. Run it in a subshell so listing cannot alter active state.
+  # shellcheck disable=SC1090
+  source "${manifest}"
+  printf '%s' "${PROFILE_DISPLAY_NAME:-${profile}}"
+)
+
+print_auth_profiles() {
+  local profile
+  while IFS= read -r profile; do
+    printf '  %-12s %s\n' "${profile}" "$(auth_profile_display_name "${profile}")"
+  done < <(available_auth_profiles)
+}
+
+select_auth_profile_interactively() {
+  local profiles=()
+  local choice profile index
+
+  if ! { : < /dev/tty > /dev/tty; } 2>/dev/null; then
+    echo "myCodex: no authentication profile is selected; specify one explicitly:" >&2
+    echo "  myCodex login <profile>" >&2
+    echo "myCodex: available profiles:" >&2
+    print_auth_profiles >&2
+    return 2
+  fi
+
+  mapfile -t profiles < <(available_auth_profiles)
+  printf 'Select an authentication profile:\n' > /dev/tty
+  for index in "${!profiles[@]}"; do
+    profile="${profiles[index]}"
+    printf '  %d) %-12s %s\n' "$((index + 1))" "${profile}" \
+      "$(auth_profile_display_name "${profile}")" > /dev/tty
+  done
+  printf 'Profile: ' > /dev/tty
+  IFS= read -r choice < /dev/tty || return 130
+
+  if [[ "${choice}" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#profiles[@]} )); then
+    printf '%s' "${profiles[choice - 1]}"
+    return
+  fi
+  for profile in "${profiles[@]}"; do
+    if [[ "${choice}" == "${profile}" ]]; then
+      printf '%s' "${profile}"
+      return
+    fi
+  done
+  echo "myCodex: unknown authentication profile '${choice}'" >&2
+  return 2
 }
 
 resolve_auth_profile() {
@@ -320,6 +447,7 @@ resolve_auth_profile() {
   PROFILE_SECRET_MANAGED=""
   PROFILE_CREDENTIAL_ENV=""
   PROFILE_DEFAULT_MODEL=""
+  PROFILE_DISPLAY_NAME="${MYCODEX_AUTH}"
   # shellcheck disable=SC1090
   source "${manifest}"
 
@@ -452,12 +580,154 @@ run_login() {
       echo "myCodex: profile '${MYCODEX_AUTH}' uses credential file ${MYCODEX_CREDENTIAL_FILE}." >&2
       ;;
     oauth-device-native)
-      run_oauth_device_login "$@"
+      run_oauth_device_login
       ;;
     *)
       die "login is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
       ;;
   esac
+}
+
+selected_credential_status() {
+  local env_name file_env_name managed_file token_file
+
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      env_name="${PROFILE_SECRET_ENV}"
+      file_env_name="${env_name}_FILE"
+      managed_file="${SCRIPT_DIR}/.secrets/${PROFILE_SECRET_MANAGED}"
+      if [[ -n "${!env_name-}" ]]; then
+        printf 'provided by %s' "${env_name}"
+      elif [[ -n "${!file_env_name-}" ]]; then
+        printf 'provided by %s' "${file_env_name}"
+      elif [[ -s "${managed_file}" && ! -L "${managed_file}" ]]; then
+        printf 'stored by myCodex'
+      elif [[ -e "${managed_file}" || -L "${managed_file}" ]]; then
+        printf 'invalid managed credential at %s' "${managed_file}"
+      else
+        printf 'not configured'
+      fi
+      ;;
+    oauth-device-native)
+      token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
+      if chatgpt_auth_complete "${token_file}"; then
+        printf 'token stored by myCodex'
+      elif [[ -e "${token_file}" || -L "${token_file}" ]]; then
+        printf 'device login incomplete or invalid'
+      else
+        printf 'not logged in'
+      fi
+      ;;
+    credential-file)
+      env_name="${PROFILE_CREDENTIAL_ENV}"
+      if [[ -n "${!env_name-}" ]]; then
+        printf 'provided by %s' "${env_name}"
+      else
+        printf 'not configured'
+      fi
+      ;;
+    *)
+      printf 'unsupported credential kind %s' "${CREDENTIAL_KIND}"
+      ;;
+  esac
+}
+
+running_auth_profile() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
+    "${CODEX_CONTAINER_NAME}" 2>/dev/null
+}
+
+run_auth_status() {
+  local fallback running
+
+  printf 'Selected profile: %s (%s)\n' "${MYCODEX_AUTH}" "${AUTH_SELECTION_SOURCE}"
+  printf 'Authentication:  %s\n' "$(selected_credential_status)"
+  if [[ "${AUTH_SELECTION_SOURCE}" != "persisted" \
+      && ( -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ) ]]; then
+    fallback="$(read_persisted_auth_profile)"
+    printf 'Stored default:  %s\n' "${fallback}"
+  fi
+  if running="$(running_auth_profile)" && [[ -n "${running}" ]]; then
+    printf 'Running profile: %s\n' "${running}"
+  else
+    printf 'Running profile: none for this project\n'
+  fi
+}
+
+run_auth_list() {
+  local profile marker
+
+  while IFS= read -r profile; do
+    marker=" "
+    [[ "${profile}" == "${MYCODEX_AUTH}" ]] && marker="*"
+    printf '%s %-12s %s\n' "${marker}" "${profile}" \
+      "$(auth_profile_display_name "${profile}")"
+  done < <(available_auth_profiles)
+}
+
+run_logout() {
+  local file_env_name managed_file token_dir token_file running removed=0
+
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      managed_file="${SCRIPT_DIR}/.secrets/${PROFILE_SECRET_MANAGED}"
+      if [[ -L "${managed_file}" ]]; then
+        die "${managed_file} is a symlink; refusing to treat it as managed credential state"
+      fi
+      if [[ -e "${managed_file}" ]]; then
+        [[ -f "${managed_file}" ]] || die "${managed_file} is not a regular file"
+        rm -f -- "${managed_file}" || die "failed to remove ${managed_file}"
+        removed=1
+      fi
+      file_env_name="${PROFILE_SECRET_ENV}_FILE"
+      if [[ -n "${!PROFILE_SECRET_ENV-}" || -n "${!file_env_name-}" ]]; then
+        echo "myCodex: ${PROFILE_SECRET_ENV} is still supplied externally and was not changed." >&2
+      fi
+      ;;
+    oauth-device-native)
+      token_dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
+      token_file="${token_dir}/auth.json"
+      [[ ! -L "${token_dir}" ]] || die "${token_dir} is a symlink; refusing to modify it"
+      [[ ! -L "${token_file}" ]] || die "${token_file} is a symlink; refusing to modify it"
+      if [[ -e "${token_file}" ]]; then
+        [[ -f "${token_file}" ]] || die "${token_file} is not a regular file"
+        rm -f -- "${token_file}" || die "failed to remove ${token_file}"
+        removed=1
+      fi
+      ;;
+    credential-file)
+      echo "myCodex: profile '${MYCODEX_AUTH}' uses an external credential file; it was not modified." >&2
+      ;;
+    *)
+      die "logout is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+
+  clear_persisted_auth_profile "${MYCODEX_AUTH}"
+  if (( removed )); then
+    echo "myCodex: removed the managed credential for profile '${MYCODEX_AUTH}'." >&2
+  else
+    echo "myCodex: no managed credential was stored for profile '${MYCODEX_AUTH}'." >&2
+  fi
+  if running="$(running_auth_profile)" && [[ "${running}" == "${MYCODEX_AUTH}" ]]; then
+    echo "myCodex: running containers were not changed; bring this project down to end its current session." >&2
+  fi
+}
+
+print_wrapper_auth_help() {
+  cat <<'EOF'
+
+Authentication commands added by the recipe wrapper:
+  myCodex login [profile]           Authenticate and select a persistent profile
+  myCodex logout [profile]          Remove myCodex-managed credentials
+  myCodex auth status               Show selected, stored, and running profiles
+  myCodex auth list                 List available profiles
+  myCodex --auth <profile> ...      Override the profile for one invocation
+
+MYCODEX_AUTH remains a one-invocation override for automation. A profile passed
+to `login` is stored only after authentication succeeds.
+EOF
 }
 
 # Login is complete only when auth.json actually carries a non-empty access_token.
@@ -638,6 +908,84 @@ run_oauth_device_login() {
   run_chatgpt_device_flow "${token_file}" "${model}" "${ready_timeout}" "${login_timeout}"
 }
 
+# Parse the wrapper's one root option before handing the remaining argv to the
+# vendored launcher. `login <profile>` is also an explicit CLI selection and has
+# the same precedence as --auth.
+wrapper_args=("$@")
+auth_option=""
+case "${wrapper_args[0]-}" in
+  --auth)
+    [[ ${#wrapper_args[@]} -ge 2 && -n "${wrapper_args[1]}" ]] \
+      || die "--auth requires a profile id"
+    auth_option="${wrapper_args[1]}"
+    wrapper_args=("${wrapper_args[@]:2}")
+    ;;
+  --auth=*)
+    auth_option="${wrapper_args[0]#--auth=}"
+    [[ -n "${auth_option}" ]] || die "--auth requires a profile id"
+    wrapper_args=("${wrapper_args[@]:1}")
+    ;;
+esac
+set -- "${wrapper_args[@]}"
+
+auth_command="${1:-}"
+auth_command_profile=""
+auth_command_profile_consumed=0
+case "${auth_command}" in
+  login|logout)
+    if [[ -n "${2:-}" && "${2}" != -* ]]; then
+      auth_command_profile="${2}"
+      auth_command_profile_consumed=1
+    fi
+    ;;
+esac
+
+if [[ -n "${auth_option}" && -n "${auth_command_profile}" \
+    && "${auth_option}" != "${auth_command_profile}" ]]; then
+  die "conflicting auth profiles: --auth=${auth_option} and ${auth_command} ${auth_command_profile}"
+fi
+
+login_should_persist=0
+if [[ -n "${auth_command_profile}" ]]; then
+  MYCODEX_AUTH="${auth_command_profile}"
+  AUTH_SELECTION_SOURCE="command line"
+  [[ "${auth_command}" == "login" ]] && login_should_persist=1
+elif [[ -n "${auth_option}" ]]; then
+  MYCODEX_AUTH="${auth_option}"
+  AUTH_SELECTION_SOURCE="--auth override"
+elif [[ -n "${MYCODEX_AUTH-}" ]]; then
+  AUTH_SELECTION_SOURCE="MYCODEX_AUTH override"
+elif [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]]; then
+  MYCODEX_AUTH="$(read_persisted_auth_profile)"
+  AUTH_SELECTION_SOURCE="persisted"
+else
+  MYCODEX_AUTH="openai"
+  AUTH_SELECTION_SOURCE="default"
+fi
+
+case "${auth_command}" in
+  login)
+    if [[ "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+      print_wrapper_auth_help
+      exit 0
+    fi
+    if [[ -z "${auth_command_profile}" && "${AUTH_SELECTION_SOURCE}" == "default" ]]; then
+      MYCODEX_AUTH="$(select_auth_profile_interactively)"
+      AUTH_SELECTION_SOURCE="interactive selection"
+      login_should_persist=1
+    fi
+    ;;
+  auth)
+    if [[ "${2:-status}" == "help" || "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+      print_wrapper_auth_help
+      exit 0
+    fi
+    ;;
+esac
+
+# Exported so Compose can stamp the selected profile as a container label.
+validate_profile_id "${MYCODEX_AUTH}"
+export MYCODEX_AUTH
 resolve_auth_profile
 
 # Default to a per-project Codex state volume: it isolates each project's codex
@@ -666,12 +1014,50 @@ if [[ -n "${MYCODEX_MODEL:-}" || -n "${PROFILE_DEFAULT_MODEL}" ]]; then
   export MYCODEX_MODEL="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL}}"
 fi
 
-# `login` is a recipe-level convenience, not a Compose verb; handle it here.
-if [[ "${1:-}" == "login" ]]; then
-  shift || true
-  run_login "$@"
-  exit $?
-fi
+# Authentication commands are recipe-level operations, not Compose verbs.
+case "${auth_command}" in
+  login)
+    auth_args=("${wrapper_args[@]:1}")
+    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    [[ ${#auth_args[@]} -eq 0 ]] \
+      || die "login accepts at most one profile id"
+    run_login
+    if (( login_should_persist )); then
+      persist_auth_profile "${MYCODEX_AUTH}"
+      echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+    fi
+    exit 0
+    ;;
+  logout)
+    auth_args=("${wrapper_args[@]:1}")
+    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    [[ ${#auth_args[@]} -eq 0 ]] \
+      || die "logout accepts at most one profile id"
+    run_logout
+    exit 0
+    ;;
+  auth)
+    case "${2:-status}" in
+      status)
+        [[ $# -le 2 ]] || die "auth status accepts no arguments"
+        run_auth_status
+        ;;
+      list)
+        [[ $# -le 2 ]] || die "auth list accepts no arguments"
+        run_auth_list
+        ;;
+      *)
+        die "unknown auth command '${2}'; expected status or list"
+        ;;
+    esac
+    exit 0
+    ;;
+  help|-h|--help)
+    launcher help
+    print_wrapper_auth_help
+    exit 0
+    ;;
+esac
 
 # Refuse to "activate" a profile that differs from the one already running when
 # the verb cannot recreate containers to apply it. `up` is exempt: it recreates,

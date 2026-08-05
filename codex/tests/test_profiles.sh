@@ -68,6 +68,59 @@ grep -Fq "vaka.yaml compose" "${default_capture}.env" || fail "openai did not us
 grep -Fxq 'OPENAI_API_KEY_SET=yes' "${default_capture}.env" || fail "openai did not resolve the provider key"
 echo "ok: openai profile injects no overlay and uses the root policy"
 
+# --- persistent selection and explicit override precedence -----------------
+login_output="${TMP}/login-openai.out"
+( cd "${WORKSPACE}" && env OPENAI_API_KEY=test-provider-key \
+    "${RECIPE}/myCodex" login openai > "${login_output}" 2>&1 )
+auth_profile_file="${RECIPE}/.secrets/auth_profile"
+[[ "$(<"${auth_profile_file}")" == "openai" ]] \
+  || fail "login did not persist the selected profile"
+
+status_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodex" auth status)"
+grep -Fq 'Selected profile: openai (persisted)' <<< "${status_output}" \
+  || fail "auth status did not report the persisted profile"
+list_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodex" auth list)"
+grep -Eq '^\* openai[[:space:]]+OpenAI API key$' <<< "${list_output}" \
+  || fail "auth list did not mark the selected profile"
+
+printf '%s\n' chatgpt > "${auth_profile_file}"
+persisted_capture="${TMP}/capture-persisted"
+run_wrapper "${persisted_capture}"
+grep -Fq "auth-profiles/chatgpt/overlay.yaml" "${persisted_capture}.argv" \
+  || fail "persisted profile was not used by a normal invocation"
+
+override_capture="${TMP}/capture-auth-option"
+( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${override_capture}" \
+    OPENAI_API_KEY=test-provider-key "${RECIPE}/myCodex" --auth openai up )
+grep -Fq "vaka.yaml compose" "${override_capture}.env" \
+  || fail "--auth did not override the persisted profile"
+[[ "$(<"${auth_profile_file}")" == "chatgpt" ]] \
+  || fail "one-invocation --auth override modified the persisted profile"
+
+env_override_capture="${TMP}/capture-auth-env"
+run_wrapper "${env_override_capture}" MYCODEX_AUTH=openai OPENAI_API_KEY=test-provider-key
+[[ "$(<"${auth_profile_file}")" == "chatgpt" ]] \
+  || fail "MYCODEX_AUTH override modified the persisted profile"
+
+printf '%s\n' openai > "${auth_profile_file}"
+failed_login_err="${TMP}/failed-login.err"
+if ( cd "${WORKSPACE}" && "${RECIPE}/myCodex" login vertex \
+    > /dev/null 2> "${failed_login_err}" ); then
+  fail "vertex login accepted a missing credential file"
+fi
+[[ "$(<"${auth_profile_file}")" == "openai" ]] \
+  || fail "failed login replaced the persisted profile"
+echo "ok: profile selection persists transactionally with explicit override precedence"
+
+# --- logout removes only managed state -------------------------------------
+printf '%s\n' managed-provider-key > "${RECIPE}/.secrets/openai_api_key"
+( cd "${WORKSPACE}" && "${RECIPE}/myCodex" logout openai > /dev/null 2>&1 )
+[[ ! -e "${RECIPE}/.secrets/openai_api_key" ]] \
+  || fail "logout did not remove the managed provider credential"
+[[ ! -e "${auth_profile_file}" ]] \
+  || fail "logout did not clear the matching persisted profile"
+echo "ok: logout clears matching myCodex-managed credential and profile state"
+
 # --- chatgpt profile: overlay injected, config/model/policy switched --------
 chatgpt_capture="${TMP}/capture-chatgpt"
 run_wrapper "${chatgpt_capture}" MYCODEX_AUTH=chatgpt
