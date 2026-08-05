@@ -468,8 +468,18 @@ resolve_auth_profile() {
 ensure_chatgpt_token_dir() {
   ensure_managed_secrets_dir "MYCODEX_AUTH" "${SCRIPT_DIR}/.secrets" || exit $?
   local dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
-  [[ -d "${dir}" ]] && return
-  (umask 077 && mkdir -p -- "${dir}") || die "failed to create ${dir}"
+  local auth_file="${dir}/auth.json"
+
+  [[ ! -L "${dir}" ]] || die "${dir} is a symlink; managed token storage must be a real directory"
+  if [[ -e "${dir}" ]]; then
+    [[ -d "${dir}" ]] || die "${dir} exists but is not a directory"
+  else
+    (umask 077 && mkdir -p -- "${dir}") || die "failed to create ${dir}"
+  fi
+  [[ ! -L "${auth_file}" ]] || die "${auth_file} is a symlink; managed token state must be a regular file"
+  if [[ -e "${auth_file}" && ! -f "${auth_file}" ]]; then
+    die "${auth_file} exists but is not a regular file"
+  fi
 }
 
 # credential-file kind: PROFILE_CREDENTIAL_ENV names a host env var whose value
@@ -516,14 +526,15 @@ acquire_credentials() {
 # name. A stack created before this label existed, or a missing docker CLI,
 # degrades to no-op (nothing to compare against).
 guard_profile_switch() {
+  local operation="${1:-start/restart}"
   command -v docker >/dev/null 2>&1 || return 0
   local running
   running="$(docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
     "${CODEX_CONTAINER_NAME}" 2>/dev/null)" || return 0
   [[ -n "${running}" && "${running}" != "${MYCODEX_AUTH}" ]] || return 0
   die "this project is running under auth profile '${running}', not '${MYCODEX_AUTH}'.
-myCodex: start/restart cannot switch profiles (they do not recreate containers).
-myCodex: run '${SCRIPT_DIR}/myCodex down' then '${SCRIPT_DIR}/myCodex up' to switch to '${MYCODEX_AUTH}'."
+myCodex: ${operation} will not replace containers created for another profile.
+myCodex: run '${SCRIPT_DIR}/myCodex down' first, then retry with '${MYCODEX_AUTH}'."
 }
 
 # Import a pre-existing ChatGPT auth.json into the sidecar token dir, normalizing
@@ -536,7 +547,7 @@ import_chatgpt_auth() {
     || die "python3 is required to import MYCODEX_CHATGPT_AUTH; otherwise use the interactive login"
   ensure_chatgpt_token_dir
   python3 - "${src}" "${dst}" <<'PY'
-import json, os, sys
+import json, os, sys, tempfile
 src, dst = sys.argv[1], sys.argv[2]
 raw = json.load(open(src))
 if isinstance(raw.get("access_token"), str):
@@ -550,9 +561,25 @@ else:
             out[k] = raw[k]
 if not isinstance(out.get("access_token"), str) or not out["access_token"]:
     sys.exit("MYCODEX_CHATGPT_AUTH: no access_token found to import")
-fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w") as f:
-    json.dump(out, f, indent=2)
+fd, tmp = tempfile.mkstemp(prefix=".auth.json.", dir=os.path.dirname(dst))
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(out, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dst)
+except BaseException:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 PY
 }
 
@@ -561,8 +588,9 @@ launcher() {
 }
 
 follow_litellm_logs() {
+  local since="$1"
   exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" \
-    "${private_env[@]}" "${profile_files[@]}" logs --tail=0 -f litellm
+    "${private_env[@]}" "${profile_files[@]}" logs --since "${since}" --follow litellm
 }
 
 # `myCodex login` primes the selected profile's credential. For env-secret /
@@ -736,29 +764,140 @@ EOF
 # not mean success.
 chatgpt_auth_complete() {
   local file="$1"
-  [[ -s "${file}" ]] || return 1
+  [[ -s "${file}" && ! -L "${file}" && -f "${file}" ]] || return 1
   grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"[^"]+"' "${file}"
 }
 
-# Poll LiteLLM until it returns a successful liveliness response. `up -d`
-# returns once containers have started, not once the proxy is serving. Bound the
-# whole readiness phase by wall-clock time; an individual curl timeout must not
-# silently multiply the advertised deadline.
+# Resolve the Compose-managed sidecar without depending on its generated name.
+# The command's exit status distinguishes an absent service from a failed query;
+# callers must not treat a failed query as permission to remove state.
+LITELLM_CONTAINER_ID=""
+resolve_litellm_container_id() {
+  local output
+  local ids=()
+
+  LITELLM_CONTAINER_ID=""
+  output="$(launcher ps --all --quiet litellm)" || return 2
+  [[ -n "${output}" ]] || return 1
+  mapfile -t ids <<< "${output}"
+  [[ ${#ids[@]} -eq 1 && "${ids[0]}" =~ ^[0-9a-fA-F]{12,64}$ ]] \
+    || return 2
+  LITELLM_CONTAINER_ID="${ids[0]}"
+}
+
+LOGIN_LITELLM_PRIOR_STATE="absent"
+snapshot_litellm_state() {
+  local resolve_status=0 state
+
+  resolve_litellm_container_id || resolve_status=$?
+  case "${resolve_status}" in
+    0)
+      state="$(docker inspect --format '{{.State.Status}}' "${LITELLM_CONTAINER_ID}" 2>/dev/null)" \
+        || die "could not inspect the existing LiteLLM container"
+      LOGIN_LITELLM_PRIOR_STATE="${state:-unknown}"
+      ;;
+    1)
+      LOGIN_LITELLM_PRIOR_STATE="absent"
+      ;;
+    *)
+      die "could not determine whether the LiteLLM service already exists"
+      ;;
+  esac
+}
+
+restore_litellm_state() {
+  local resolve_status=0
+
+  case "${LOGIN_LITELLM_PRIOR_STATE}" in
+    running)
+      return 0
+      ;;
+    absent)
+      echo "myCodex: removing the temporary LiteLLM login service." >&2
+      launcher rm --stop --force litellm \
+        || echo "myCodex: warning: failed to remove the temporary LiteLLM service." >&2
+      ;;
+    paused)
+      resolve_litellm_container_id || resolve_status=$?
+      if (( resolve_status == 0 )); then
+        docker pause "${LITELLM_CONTAINER_ID}" >/dev/null 2>&1 \
+          || echo "myCodex: warning: failed to restore the paused LiteLLM state." >&2
+      fi
+      ;;
+    created|exited|dead)
+      echo "myCodex: restoring the LiteLLM service to a stopped state." >&2
+      launcher stop litellm \
+        || echo "myCodex: warning: failed to stop the LiteLLM login service." >&2
+      ;;
+    *)
+      echo "myCodex: warning: prior LiteLLM state was '${LOGIN_LITELLM_PRIOR_STATE}'; leaving the service unchanged." >&2
+      ;;
+  esac
+}
+
+probe_litellm_ready() {
+  local container_id="$1"
+  local request_timeout="$2"
+
+  docker exec "${container_id}" python -c '
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen(
+        "http://127.0.0.1:4000/health/liveliness",
+        timeout=float(sys.argv[1]),
+    ) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"HTTP {response.status}")
+except Exception as exc:
+    print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "${request_timeout}"
+}
+
+# Poll the server from inside the sidecar. Login verifies the component that owns
+# OAuth; normal stack startup remains responsible for the agent-to-proxy path.
+LITELLM_READY_ERROR=""
 wait_for_litellm_ready() {
-  local timeout="$1"
+  local container_id="$1"
+  local timeout="$2"
+  local log_pid="$3"
+  local started="${SECONDS}"
   local deadline=$((SECONDS + timeout))
-  local remaining request_timeout sleep_for
+  local remaining request_timeout sleep_for output elapsed
+  local last_reported=""
+  local next_progress="${SECONDS}"
 
   while (( SECONDS < deadline )); do
+    if ! kill -0 "${log_pid}" 2>/dev/null; then
+      if wait "${log_pid}"; then
+        LITELLM_READY_ERROR="LiteLLM log stream ended unexpectedly"
+      else
+        LITELLM_READY_ERROR="LiteLLM log stream failed (exit $?)"
+      fi
+      return 1
+    fi
+
     remaining=$((deadline - SECONDS))
     request_timeout=3
     (( remaining < request_timeout )) && request_timeout="${remaining}"
 
-    if docker exec "${CODEX_CONTAINER_NAME}" \
-        curl --fail --silent --show-error --output /dev/null \
-          --max-time "${request_timeout}" \
-          http://litellm:4000/health/liveliness >/dev/null 2>&1; then
+    if output="$(probe_litellm_ready "${container_id}" "${request_timeout}" 2>&1)"; then
+      elapsed=$((SECONDS - started))
+      echo "myCodex: LiteLLM ready after ${elapsed}s." >&2
       return 0
+    fi
+    output="${output//$'\n'/; }"
+    [[ ${#output} -le 400 ]] || output="${output:0:397}..."
+    LITELLM_READY_ERROR="${output:-readiness probe failed without diagnostic output}"
+
+    if [[ "${LITELLM_READY_ERROR}" != "${last_reported}" \
+        || "${SECONDS}" -ge "${next_progress}" ]]; then
+      elapsed=$((SECONDS - started))
+      echo "myCodex: LiteLLM not ready after ${elapsed}s: ${LITELLM_READY_ERROR}" >&2
+      last_reported="${LITELLM_READY_ERROR}"
+      next_progress=$((SECONDS + 10))
     fi
 
     remaining=$((deadline - SECONDS))
@@ -785,27 +924,47 @@ read_positive_timeout() {
 # error, not a reason to silently create another device code.
 CHATGPT_PROBE_PID=0
 trigger_chatgpt_device_flow() {
-  local model="$1"
-  local timeout="$2"
-  local payload
+  local container_id="$1"
+  local model="$2"
+  local timeout="$3"
 
   case "${model}" in
     ''|*[!A-Za-z0-9._:/@+-]*)
       die "ChatGPT login model contains unsupported characters: '${model}'"
       ;;
   esac
-  printf -v payload '{"model":"%s","input":"login probe"}' "${model}"
+  # Build and authorize the request inside the sidecar so the embedded gateway
+  # key never appears in host process argv. The server itself owns OAuth and
+  # writes the resulting token through its managed bind mount.
+  docker exec "${container_id}" python -c '
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
 
-  # Expand OPENAI_API_KEY inside the container so the long-lived host-side
-  # `docker exec` process does not expose the proxy key in its argv.
-  docker exec "${CODEX_CONTAINER_NAME}" bash -lc \
-    'exec curl --fail --silent --show-error --output /dev/null \
-      --max-time "$1" \
-      http://litellm:4000/v1/responses \
-      --header "Authorization: Bearer ${OPENAI_API_KEY}" \
-      --header "Content-Type: application/json" \
-      --data "$2"' \
-    _ "${timeout}" "${payload}" &
+key = os.environ.get("LITELLM_MASTER_KEY")
+if not key:
+    print("LITELLM_MASTER_KEY is missing inside the sidecar", file=sys.stderr)
+    raise SystemExit(2)
+
+request = urllib.request.Request(
+    "http://127.0.0.1:4000/v1/responses",
+    data=json.dumps({"model": sys.argv[1], "input": "login probe"}).encode(),
+    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=float(sys.argv[2])) as response:
+        response.read()
+except urllib.error.HTTPError as exc:
+    detail = exc.read(2048).decode("utf-8", "replace")
+    print(f"LiteLLM returned HTTP {exc.code}: {detail}", file=sys.stderr)
+    raise SystemExit(22)
+except Exception as exc:
+    print(f"LiteLLM request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "${model}" "${timeout}" &
   CHATGPT_PROBE_PID=$!
 }
 
@@ -821,6 +980,8 @@ run_chatgpt_device_flow() (
   local model="$2"
   local ready_timeout="$3"
   local login_timeout="$4"
+  local container_id="$5"
+  local log_since="$6"
   local log_pid=0
   local probe_pid=0
 
@@ -828,14 +989,14 @@ run_chatgpt_device_flow() (
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
 
-  echo "myCodex: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
-  wait_for_litellm_ready "${ready_timeout}" \
-    || die "LiteLLM did not become ready within ${ready_timeout}s; inspect '${SCRIPT_DIR}/myCodex logs litellm' and retry"
-
-  # Follow only new output so a code from an earlier login attempt cannot be
-  # mistaken for the current one.
-  follow_litellm_logs &
+  # Backfill this attempt's startup output before readiness. Device login may be
+  # initiated during startup, and those URL/code lines must never be hidden.
+  follow_litellm_logs "${log_since}" &
   log_pid=$!
+
+  echo "myCodex: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
+  wait_for_litellm_ready "${container_id}" "${ready_timeout}" "${log_pid}" \
+    || die "LiteLLM did not become ready within ${ready_timeout}s. Last probe: ${LITELLM_READY_ERROR}"
 
   local deadline=$((SECONDS + login_timeout))
   local next_status=$((SECONDS + 30))
@@ -843,7 +1004,7 @@ run_chatgpt_device_flow() (
   local request_timeout=$((login_timeout + 5))
 
   echo "myCodex: waiting up to ${login_timeout}s for browser authorization and MFA; press Ctrl-C to cancel." >&2
-  trigger_chatgpt_device_flow "${model}" "${request_timeout}"
+  trigger_chatgpt_device_flow "${container_id}" "${model}" "${request_timeout}"
   probe_pid="${CHATGPT_PROBE_PID}"
 
   while ! chatgpt_auth_complete "${token_file}"; do
@@ -862,6 +1023,16 @@ run_chatgpt_device_flow() (
       die "ChatGPT device-login request ended before credentials were issued (exit ${probe_status}); review the LiteLLM output above and retry"
     fi
 
+    if ! kill -0 "${log_pid}" 2>/dev/null; then
+      if wait "${log_pid}"; then
+        probe_status=0
+      else
+        probe_status=$?
+      fi
+      log_pid=0
+      die "LiteLLM log stream ended during device login (exit ${probe_status}); retry so the verification code remains observable"
+    fi
+
     if (( SECONDS >= next_status )); then
       remaining=$((deadline - SECONDS))
       echo "myCodex: still waiting for browser authorization (${remaining}s remaining; Ctrl-C cancels)." >&2
@@ -877,9 +1048,23 @@ run_chatgpt_device_flow() (
   echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
 )
 
-run_oauth_device_login() {
+run_oauth_device_login() (
   acquire_credentials
   local token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
+  local cleanup_service=0
+  local container_resolve_status=0
+  local log_since
+
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2317
+  cleanup_oauth_login() {
+    local status=$?
+    trap - EXIT
+    if (( cleanup_service )); then
+      restore_litellm_state
+    fi
+    exit "${status}"
+  }
 
   if [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
     import_chatgpt_auth "${MYCODEX_CHATGPT_AUTH}" "${token_file}"
@@ -893,6 +1078,7 @@ run_oauth_device_login() {
   fi
 
   command -v docker >/dev/null 2>&1 || die "docker is required for 'myCodex login'"
+  guard_profile_switch "login"
 
   echo "myCodex: starting the LiteLLM ChatGPT device login." >&2
   echo "myCodex: a verification URL and code will appear below — open the URL," >&2
@@ -903,10 +1089,21 @@ run_oauth_device_login() {
   ready_timeout="$(read_positive_timeout MYCODEX_CHATGPT_READY_TIMEOUT 60)"
   login_timeout="$(read_positive_timeout MYCODEX_CHATGPT_LOGIN_TIMEOUT 900)"
 
-  launcher up -d || die "failed to start the stack for login"
+  snapshot_litellm_state
+  cleanup_service=1
+  trap cleanup_oauth_login EXIT
 
-  run_chatgpt_device_flow "${token_file}" "${model}" "${ready_timeout}" "${login_timeout}"
-}
+  log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
+  launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
+
+  resolve_litellm_container_id || container_resolve_status=$?
+  (( container_resolve_status == 0 )) \
+    || die "LiteLLM started but its Compose container could not be identified"
+
+  run_chatgpt_device_flow "${token_file}" "${model}" "${ready_timeout}" \
+    "${login_timeout}" "${LITELLM_CONTAINER_ID}" "${log_since}"
+)
 
 # Parse the wrapper's one root option before handing the remaining argv to the
 # vendored launcher. `login <profile>` is also an explicit CLI selection and has

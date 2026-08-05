@@ -17,40 +17,83 @@ cp -R "${RECIPE_SOURCE}/auth-profiles" "${RECIPE}/auth-profiles"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# The vendored launcher is not under test here. It acknowledges `up -d` and
-# follows logs until the wrapper terminates it, recording cleanup for assertion.
+# The vendored launcher is not under test here. This stub models one Compose
+# service closely enough to verify service scope, attempt-bounded logs, and
+# restoration when login created the sidecar.
 cat > "${RECIPE}/bin/myCodex" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${MYCODEX_TEST_LAUNCHER_CALLS:?}"
-for arg in "$@"; do
-  if [[ "${arg}" == "logs" ]]; then
+
+args=" $* "
+case "${args}" in
+  *" ps --all --quiet litellm "*)
+    [[ -e "${MYCODEX_TEST_SERVICE_EXISTS:?}" ]] && printf '%s\n' "${MYCODEX_TEST_CONTAINER_ID:?}"
+    exit 0
+    ;;
+  *" up -d litellm "*)
+    : > "${MYCODEX_TEST_SERVICE_EXISTS:?}"
+    exit 0
+    ;;
+  *" logs --since "*" --follow litellm "*)
     cleanup() {
       : > "${MYCODEX_TEST_LOG_CLEANED:?}"
       exit 0
     }
     trap cleanup INT TERM
-    echo "litellm: simulated device-login output" >&2
+    echo "Sign in with ChatGPT using device code:" >&2
+    echo "1) Visit https://auth.openai.com/codex/device" >&2
+    echo "2) Enter code: TEST-CODE" >&2
     while :; do sleep 1; done
-  fi
-done
+    ;;
+  *" rm --stop --force litellm "*)
+    rm -f -- "${MYCODEX_TEST_SERVICE_EXISTS:?}"
+    exit 0
+    ;;
+  *" stop litellm "*)
+    : > "${MYCODEX_TEST_SERVICE_STOPPED:?}"
+    exit 0
+    ;;
+esac
 STUB
 chmod 755 "${RECIPE}/bin/myCodex"
 
-# Fake only the two `docker exec` calls owned by the login flow: readiness and
-# the provider request. Each mode makes the process lifecycle deterministic.
+# Fake the profile guard, sidecar-state snapshot, and two sidecar-local execs.
 cat > "${FAKE_BIN}/docker" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" == "exec" ]] || exit 1
-shift
-[[ $# -gt 0 ]] || exit 1
-shift # container name
+
+case "${1:-}" in
+  inspect)
+    container="${*: -1}"
+    if [[ "${container}" == "${MYCODEX_TEST_CONTAINER_ID:?}" ]]; then
+      printf '%s\n' "${MYCODEX_TEST_PRIOR_STATE:-running}"
+      exit 0
+    fi
+    # No codex container exists, so the profile-switch guard is a no-op.
+    exit 1
+    ;;
+  exec)
+    shift
+    [[ "${1:-}" == "${MYCODEX_TEST_CONTAINER_ID:?}" ]] || exit 98
+    shift
+    ;;
+  pause)
+    : > "${MYCODEX_TEST_SERVICE_PAUSED:?}"
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 
 case " $* " in
-  *" http://litellm:4000/health/liveliness "*)
-    [[ "${MYCODEX_TEST_MODE:?}" != "not-ready" ]]
-    exit $?
+  *"health/liveliness"*)
+    if [[ "${MYCODEX_TEST_MODE:?}" == "not-ready" ]]; then
+      echo "ConnectionRefusedError: simulated refusal" >&2
+      exit 1
+    fi
+    exit 0
     ;;
 esac
 
@@ -85,18 +128,27 @@ REQUESTS="${TMP}/requests"
 LAUNCHER_CALLS="${TMP}/launcher-calls"
 LOG_CLEANED="${TMP}/log-cleaned"
 PROBE_CLEANED="${TMP}/probe-cleaned"
+SERVICE_EXISTS="${TMP}/service-exists"
+SERVICE_STOPPED="${TMP}/service-stopped"
+SERVICE_PAUSED="${TMP}/service-paused"
+CONTAINER_ID="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 reset_case() {
   rm -f -- "${TOKEN_FILE}" "${REQUESTS}" "${LAUNCHER_CALLS}" \
-    "${LOG_CLEANED}" "${PROBE_CLEANED}"
+    "${LOG_CLEANED}" "${PROBE_CLEANED}" "${SERVICE_EXISTS}" \
+    "${SERVICE_STOPPED}" "${SERVICE_PAUSED}"
 }
 
 run_login() {
   local mode="$1"
   local ready_timeout="$2"
   local login_timeout="$3"
+  local prior_state="${4:-absent}"
   (
     cd "${WORKSPACE}"
+    if [[ "${prior_state}" != "absent" ]]; then
+      : > "${SERVICE_EXISTS}"
+    fi
     env \
       PATH="${FAKE_BIN}:${PATH}" \
       MYCODEX_AUTH=chatgpt \
@@ -108,6 +160,11 @@ run_login() {
       MYCODEX_TEST_LAUNCHER_CALLS="${LAUNCHER_CALLS}" \
       MYCODEX_TEST_LOG_CLEANED="${LOG_CLEANED}" \
       MYCODEX_TEST_PROBE_CLEANED="${PROBE_CLEANED}" \
+      MYCODEX_TEST_SERVICE_EXISTS="${SERVICE_EXISTS}" \
+      MYCODEX_TEST_SERVICE_STOPPED="${SERVICE_STOPPED}" \
+      MYCODEX_TEST_SERVICE_PAUSED="${SERVICE_PAUSED}" \
+      MYCODEX_TEST_CONTAINER_ID="${CONTAINER_ID}" \
+      MYCODEX_TEST_PRIOR_STATE="${prior_state}" \
       "${RECIPE}/myCodex" login
   )
 }
@@ -124,8 +181,19 @@ if output="$(run_login not-ready 1 30 2>&1)"; then
 fi
 grep -Fq 'did not become ready within 1s' <<< "${output}" \
   || fail "readiness timeout was not actionable"
+grep -Fq 'ConnectionRefusedError: simulated refusal' <<< "${output}" \
+  || fail "readiness timeout hid the last probe diagnostic"
+grep -Fq 'Enter code: TEST-CODE' <<< "${output}" \
+  || fail "startup device-code output was hidden behind readiness"
 [[ "$(request_count)" == "0" ]] || fail "OAuth started before LiteLLM was ready"
-echo "ok: readiness timeout is bounded and does not start device login"
+grep -Eq 'up -d litellm$' "${LAUNCHER_CALLS}" \
+  || fail "login did not scope startup to the LiteLLM service"
+grep -Eq 'logs --since [^ ]+ --follow litellm$' "${LAUNCHER_CALLS}" \
+  || fail "login did not follow attempt-bounded startup logs"
+grep -Eq 'rm --stop --force litellm$' "${LAUNCHER_CALLS}" \
+  || fail "login did not remove a sidecar created only for authentication"
+[[ ! -e "${SERVICE_EXISTS}" ]] || fail "temporary login sidecar remained after readiness failure"
+echo "ok: readiness is bounded, diagnostic, observable, and sidecar-scoped"
 
 # A provider/configuration failure is terminal. It must not mint repeated codes
 # or remain hidden until the human authorization deadline.
@@ -151,6 +219,16 @@ grep -Fq 'ChatGPT login complete' <<< "${output}" || fail "success was not repor
 [[ -f "${LOG_CLEANED}" ]] || fail "log follower survived successful login"
 [[ -f "${PROBE_CLEANED}" ]] || fail "provider request survived successful login"
 echo "ok: successful login uses one request and cleans up child processes"
+
+# A sidecar that was already running belongs to the user and remains running.
+reset_case
+output="$(run_login success 5 30 running 2>&1)" \
+  || fail "login rejected an existing running sidecar: ${output}"
+if grep -Eq '(rm --stop --force|stop) litellm$' "${LAUNCHER_CALLS}"; then
+  fail "login changed the prior running sidecar state"
+fi
+[[ -e "${SERVICE_EXISTS}" ]] || fail "existing running sidecar was removed"
+echo "ok: login preserves a pre-existing running sidecar"
 
 # The browser/MFA phase gets its full configured allowance, then expires with a
 # new-code instruction. The pending provider request must be terminated.
