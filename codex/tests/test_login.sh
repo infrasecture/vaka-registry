@@ -32,6 +32,11 @@ case "${args}" in
     exit 0
     ;;
   *" up -d litellm "*)
+    if [[ "${MYCODEX_TEST_EXPECT_CLEAN_TOKEN:-0}" == "1" \
+        && -e "${MYCODEX_TEST_TOKEN_FILE:?}" ]]; then
+      echo "incomplete token state reached sidecar startup" >&2
+      exit 97
+    fi
     : > "${MYCODEX_TEST_SERVICE_EXISTS:?}"
     exit 0
     ;;
@@ -144,6 +149,7 @@ run_login() {
   local ready_timeout="$2"
   local login_timeout="$3"
   local prior_state="${4:-absent}"
+  local expect_clean_token="${5:-0}"
   (
     cd "${WORKSPACE}"
     if [[ "${prior_state}" != "absent" ]]; then
@@ -165,6 +171,7 @@ run_login() {
       MYCODEX_TEST_SERVICE_PAUSED="${SERVICE_PAUSED}" \
       MYCODEX_TEST_CONTAINER_ID="${CONTAINER_ID}" \
       MYCODEX_TEST_PRIOR_STATE="${prior_state}" \
+      MYCODEX_TEST_EXPECT_CLEAN_TOKEN="${expect_clean_token}" \
       "${RECIPE}/myCodex" login
   )
 }
@@ -194,6 +201,20 @@ grep -Eq 'rm --stop --force litellm$' "${LAUNCHER_CALLS}" \
   || fail "login did not remove a sidecar created only for authentication"
 [[ ! -e "${SERVICE_EXISTS}" ]] || fail "temporary login sidecar remained after readiness failure"
 echo "ok: readiness is bounded, diagnostic, observable, and sidecar-scoped"
+
+# An interrupted provider flow leaves request metadata but no access token.
+# Explicit retry must remove it before starting the sidecar so LiteLLM emits a
+# fresh code rather than waiting on an abandoned request.
+reset_case
+mkdir -p -- "$(dirname -- "${TOKEN_FILE}")"
+printf '{"device_code_requested_at":"stale"}\n' > "${TOKEN_FILE}"
+output="$(run_login success 5 30 absent 1 2>&1)" \
+  || fail "login retry rejected incomplete prior state: ${output}"
+grep -Fq 'discarded incomplete ChatGPT login state' <<< "${output}" \
+  || fail "login retry did not explain stale-state cleanup"
+grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"test-token"' "${TOKEN_FILE}" \
+  || fail "login retry did not replace incomplete state with a complete token"
+echo "ok: login retry discards incomplete device-flow state before startup"
 
 # A provider/configuration failure is terminal. It must not mint repeated codes
 # or remain hidden until the human authorization deadline.

@@ -72,6 +72,8 @@ echo "ok: openai profile injects no overlay and uses the root policy"
 login_output="${TMP}/login-openai.out"
 ( cd "${WORKSPACE}" && env OPENAI_API_KEY=test-provider-key \
     "${RECIPE}/myCodex" login openai > "${login_output}" 2>&1 )
+grep -Fq "credentials for profile 'openai' are configured" "${login_output}" \
+  || fail "env-secret login reported inaccurate persistence behavior"
 auth_profile_file="${RECIPE}/.secrets/auth_profile"
 [[ "$(<"${auth_profile_file}")" == "openai" ]] \
   || fail "login did not persist the selected profile"

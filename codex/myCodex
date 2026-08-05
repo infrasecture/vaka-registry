@@ -601,7 +601,7 @@ run_login() {
   case "${CREDENTIAL_KIND}" in
     env-secret)
       acquire_credentials
-      echo "myCodex: profile '${MYCODEX_AUTH}' stores an API key; nothing else to do." >&2
+      echo "myCodex: credentials for profile '${MYCODEX_AUTH}' are configured; nothing else to do." >&2
       ;;
     credential-file)
       acquire_credentials
@@ -766,6 +766,20 @@ chatgpt_auth_complete() {
   local file="$1"
   [[ -s "${file}" && ! -L "${file}" && -f "${file}" ]] || return 1
   grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"[^"]+"' "${file}"
+}
+
+# A canceled device flow leaves LiteLLM's request timestamp in auth.json. Its
+# next request may otherwise wait on that abandoned flow before printing a new
+# code. An explicit login starts a fresh flow, so discard only incomplete state.
+discard_incomplete_chatgpt_auth() {
+  local file="$1"
+
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  [[ ! -L "${file}" && -f "${file}" ]] \
+    || die "${file} must be managed regular-file state, not a symlink or other file"
+  chatgpt_auth_complete "${file}" && return 0
+  rm -f -- "${file}" || die "failed to discard incomplete ChatGPT login state at ${file}"
+  echo "myCodex: discarded incomplete ChatGPT login state; requesting a new code." >&2
 }
 
 # Resolve the Compose-managed sidecar without depending on its generated name.
@@ -1093,6 +1107,7 @@ run_oauth_device_login() (
   cleanup_service=1
   trap cleanup_oauth_login EXIT
 
+  discard_incomplete_chatgpt_auth "${token_file}"
   log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
   launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
