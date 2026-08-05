@@ -277,7 +277,15 @@ die() {
 # overlay), litellm.config.yaml, and vaka.yaml (a complete egress policy).
 # ---------------------------------------------------------------------------
 
-MYCODEX_AUTH="${MYCODEX_AUTH:-openai}"
+# Exported so Compose can stamp it as a container label (see docker-compose.yaml).
+export MYCODEX_AUTH="${MYCODEX_AUTH:-openai}"
+
+# The launcher derives the codex container name deterministically from the
+# caller directory; replicate it so we can inspect a running stack's profile.
+# Keep this in sync with bin/myCodex's PROJECT_NAME/CONTAINER_NAME derivation.
+CODEX_PROJECT_NAME="$(basename -- "${CALLER_DIR}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+[[ -n "${CODEX_PROJECT_NAME}" ]] || CODEX_PROJECT_NAME="workspace"
+CODEX_CONTAINER_NAME="${CODEX_PROJECT_NAME}-codex"
 
 # Profile fields; defaults describe the built-in "openai" profile.
 PROFILE_VAKA_FILE="${SCRIPT_DIR}/vaka.yaml"
@@ -376,6 +384,22 @@ acquire_credentials() {
   resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
 }
 
+# `docker compose start`/`restart` (and attaching to an already-running stack) do
+# not recreate containers, so they cannot apply a different profile's config or
+# egress policy. Refuse rather than run one profile's containers under another's
+# name. A stack created before this label existed, or a missing docker CLI,
+# degrades to no-op (nothing to compare against).
+guard_profile_switch() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local running
+  running="$(docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
+    "${CODEX_CONTAINER_NAME}" 2>/dev/null)" || return 0
+  [[ -n "${running}" && "${running}" != "${MYCODEX_AUTH}" ]] || return 0
+  die "this project is running under auth profile '${running}', not '${MYCODEX_AUTH}'.
+myCodex: start/restart cannot switch profiles (they do not recreate containers).
+myCodex: run '${SCRIPT_DIR}/myCodex down' then '${SCRIPT_DIR}/myCodex up' to switch to '${MYCODEX_AUTH}'."
+}
+
 # Import a pre-existing ChatGPT auth.json into the sidecar token dir, normalizing
 # Codex's nested `tokens` layout to the top-level fields LiteLLM's chatgpt/
 # provider expects (mirrors isec's NormalizeChatGPTAuth).
@@ -433,10 +457,49 @@ run_login() {
   esac
 }
 
+# Login is complete only when auth.json actually carries a non-empty access_token.
+# LiteLLM writes intermediate device-flow state (e.g. device_code_requested_at)
+# to that file before the browser step finishes, so a merely non-empty file does
+# not mean success.
+chatgpt_auth_complete() {
+  local file="$1"
+  [[ -s "${file}" ]] || return 1
+  grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"[^"]+"' "${file}"
+}
+
+# Poll LiteLLM until it accepts connections on 4000. `up -d` returns once the
+# container has started, not once the proxy is serving, so probing before this
+# would hit connection-refused and never trigger the device flow.
+wait_for_litellm_ready() {
+  local waited=0
+  while ! docker exec "${CODEX_CONTAINER_NAME}" \
+      curl -s -o /dev/null -m 5 http://litellm:4000/health/liveliness >/dev/null 2>&1; do
+    sleep 3
+    waited=$((waited + 3))
+    (( waited >= 90 )) && return 1
+  done
+  return 0
+}
+
+# Send one chatgpt-model request to trigger the provider's device flow. The
+# request blocks server-side until the user completes the browser step (or the
+# provider times out), so it runs in the background; the caller watches auth.json
+# and re-triggers if this exits early. docker exec (not the launcher's `exec`,
+# which forces a TTY) so it works detached.
+CHATGPT_PROBE_PID=0
+trigger_chatgpt_device_flow() {
+  local model="$1"
+  docker exec "${CODEX_CONTAINER_NAME}" bash -lc \
+    'curl -sS -m 900 http://litellm:4000/v1/responses \
+       -H "Authorization: Bearer ${OPENAI_API_KEY}" -H "Content-Type: application/json" \
+       -d '"'"'{"model":"'"${model}"'","input":"login probe"}'"'"' >/dev/null 2>&1' \
+    >/dev/null 2>&1 &
+  CHATGPT_PROBE_PID=$!
+}
+
 run_oauth_device_login() {
   acquire_credentials
-  local token_dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
-  local token_file="${token_dir}/auth.json"
+  local token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
 
   if [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
     import_chatgpt_auth "${MYCODEX_CHATGPT_AUTH}" "${token_file}"
@@ -444,34 +507,43 @@ run_oauth_device_login() {
     return
   fi
 
+  if chatgpt_auth_complete "${token_file}"; then
+    echo "myCodex: a ChatGPT token already exists at ${token_file}; nothing to do." >&2
+    return
+  fi
+
+  command -v docker >/dev/null 2>&1 || die "docker is required for 'myCodex login'"
+
   echo "myCodex: starting the LiteLLM ChatGPT device login." >&2
   echo "myCodex: a verification URL and code will appear below — open the URL," >&2
   echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
 
   launcher up -d || die "failed to start the stack for login"
+
+  echo "myCodex: waiting for the LiteLLM sidecar to accept requests..." >&2
+  wait_for_litellm_ready || die "LiteLLM did not become ready; inspect '${SCRIPT_DIR}/myCodex logs litellm' and retry"
+
   launcher logs -f litellm &
   local log_pid=$!
 
-  # One probe triggers the provider's device flow. Failures are expected until
-  # the browser step completes, so never let it abort the login.
   local model="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL:-gpt-5.3-codex}}"
-  launcher exec bash -lc \
-    'curl -sS -m 600 http://litellm:4000/v1/responses \
-       -H "Authorization: Bearer ${OPENAI_API_KEY}" -H "Content-Type: application/json" \
-       -d '"'"'{"model":"'"${model}"'","input":"login probe"}'"'"' >/dev/null 2>&1 || true' \
-    2>/dev/null || true
+  # The provider allows ~15 minutes for the browser step; match that budget.
+  local deadline=$((SECONDS + 900))
+  trigger_chatgpt_device_flow "${model}"
 
-  local waited=0
-  while [[ ! -s "${token_file}" ]]; do
-    sleep 2
-    waited=$((waited + 2))
-    if (( waited >= 600 )); then
-      kill "${log_pid}" 2>/dev/null || true
-      die "timed out waiting for ${token_file}; finish the browser step and rerun 'myCodex login'"
+  while ! chatgpt_auth_complete "${token_file}"; do
+    # If the triggering request returned without minting a token, fire it again.
+    if ! kill -0 "${CHATGPT_PROBE_PID}" 2>/dev/null; then
+      trigger_chatgpt_device_flow "${model}"
     fi
+    if (( SECONDS >= deadline )); then
+      kill "${log_pid}" "${CHATGPT_PROBE_PID}" 2>/dev/null || true
+      die "timed out after 15 minutes waiting for ChatGPT login; rerun '${SCRIPT_DIR}/myCodex login'"
+    fi
+    sleep 3
   done
 
-  kill "${log_pid}" 2>/dev/null || true
+  kill "${log_pid}" "${CHATGPT_PROBE_PID}" 2>/dev/null || true
   echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
 }
 
@@ -509,6 +581,15 @@ if [[ "${1:-}" == "login" ]]; then
   run_login "$@"
   exit $?
 fi
+
+# Refuse to "activate" a profile that differs from the one already running when
+# the verb cannot recreate containers to apply it. `up` is exempt: it recreates,
+# and is the documented way to switch.
+case "${1:-}" in
+  ""|start|restart)
+    guard_profile_switch
+    ;;
+esac
 
 # Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
 # render Compose config without them (Compose prints a benign unset-var warning).

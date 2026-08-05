@@ -7,7 +7,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/vaka-codex-profiles.XXXXXX")"
 trap 'rm -rf -- "${TMP}"' EXIT
 
 RECIPE="${TMP}/recipe"
-WORKSPACE="${TMP}/workspace"
+# Unique basename so the derived container name (<project>-codex) cannot collide
+# with a real running stack when the profile-switch guard runs `docker inspect`.
+WORKSPACE="${TMP}/proj-${RANDOM}${RANDOM}"
 mkdir -p "${RECIPE}/bin" "${WORKSPACE}"
 cp "${RECIPE_SOURCE}/myCodex" "${RECIPE}/myCodex"
 chmod 755 "${RECIPE}/myCodex"
@@ -83,6 +85,13 @@ grep -Fxq 'LITELLM_MASTER_KEY_SET=yes' "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not mint the internal proxy key"
 [[ -d "${RECIPE}/.secrets/chatgpt-token" ]] || fail "chatgpt profile did not create the token dir"
 echo "ok: chatgpt profile switches overlay/config/policy/model without a provider key"
+
+# --- profile-switch guard: no-op when no stack is running ------------------
+start_capture="${TMP}/capture-start"
+( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${start_capture}" MYCODEX_AUTH=chatgpt \
+    "${RECIPE}/myCodex" start )
+grep -Fxq 'start' "${start_capture}.argv" || fail "start did not reach the launcher when nothing is running"
+echo "ok: profile-switch guard is a no-op when no stack is running"
 
 # --- vertex scaffold: credential-file handler ------------------------------
 vertex_err="${TMP}/vertex-missing.err"

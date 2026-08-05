@@ -116,6 +116,12 @@ identical to the default (only the sidecar's upstream hosts change). Adding a ne
 API-key provider (e.g. Anthropic) is a new profile directory with no wrapper
 changes.
 
+Switching an existing project between profiles requires recreating the stack, so
+run `myCodex down` then `myCodex up` (or just `myCodex up`, which recreates). The
+container is labeled with the profile that created it, and `start`/`restart` —
+which do not recreate containers — refuse a mismatched profile rather than run
+one profile's config under another's egress policy.
+
 ### ChatGPT subscription
 
 ```sh

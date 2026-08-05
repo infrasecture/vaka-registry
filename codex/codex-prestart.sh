@@ -41,10 +41,12 @@ awk -v model="${model}" '
   skip_managed_block && is_table($0) { skip_managed_block = 0 }
   skip_managed_block { next }
 
-  # Drop any prior top-level model_provider / model line (before the first table).
+  # Drop any prior top-level model_provider line (before the first table).
   is_table($0) { in_table = 1 }
   !in_table && /^[[:space:]]*model_provider[[:space:]]*=/ { next }
-  !in_table && /^[[:space:]]*model[[:space:]]*=/ { next }
+  # Only drop a prior top-level model line when we are going to re-add a pin.
+  # With no pin (default openai profile) the user model choice is preserved.
+  !in_table && model != "" && /^[[:space:]]*model[[:space:]]*=/ { next }
 
   # Buffer everything else so the output can be reassembled deterministically.
   { buf[n++] = $0 }

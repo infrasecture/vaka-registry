@@ -36,6 +36,10 @@ def has_mount(svc, target):
     return any(v.get("target") == target for v in svc.get("volumes", []))
 
 
+def codex_label(compose, key):
+    return compose["services"]["codex"].get("labels", {}).get(key)
+
+
 # --- default (openai) profile: the CI-audited artifact --------------------
 compose = render()
 
@@ -46,6 +50,9 @@ if codex_image != expected_codex_image:
         f"FAIL: codex image is {codex_image!r}, want SemVer reference "
         f"{expected_codex_image!r} without a digest pin"
     )
+
+if codex_label(compose, "agent.vaka.codex.auth-profile") != "openai":
+    raise SystemExit("FAIL: default codex container is not labeled with the openai profile")
 
 try:
     condition = compose["services"]["codex"]["depends_on"]["litellm"]["condition"]
@@ -66,8 +73,13 @@ if not default_cfg.endswith("/litellm.config.yaml") or "auth-profiles" in defaul
 # --- chatgpt profile: overlay adds the rw token mount + swaps config -------
 chatgpt = render(
     overlays=["auth-profiles/chatgpt/overlay.yaml"],
-    extra_env={"MYCODEX_LITELLM_CONFIG": "./auth-profiles/chatgpt/litellm.config.yaml"},
+    extra_env={
+        "MYCODEX_AUTH": "chatgpt",
+        "MYCODEX_LITELLM_CONFIG": "./auth-profiles/chatgpt/litellm.config.yaml",
+    },
 )
+if codex_label(chatgpt, "agent.vaka.codex.auth-profile") != "chatgpt":
+    raise SystemExit("FAIL: chatgpt render did not stamp the chatgpt profile label")
 if not has_mount(chatgpt["services"]["litellm"], "/var/lib/litellm/chatgpt-token"):
     raise SystemExit("FAIL: chatgpt overlay does not mount the token dir into litellm")
 cg_cfg = litellm_config_mount(chatgpt)["source"]

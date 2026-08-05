@@ -18,6 +18,11 @@ services:
     tty: true
     stdin_open: true
     working_dir: ${MYCODEX_WORKDIR:-/workspace}
+    # Records which auth profile created this container so ./myCodex can refuse a
+    # profile switch via start/restart (which do not recreate containers) instead
+    # of silently running one profile's config under another's egress policy.
+    labels:
+      agent.vaka.codex.auth-profile: ${MYCODEX_AUTH:-openai}
     depends_on:
       litellm:
         condition: service_started
