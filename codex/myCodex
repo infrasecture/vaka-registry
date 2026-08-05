@@ -296,7 +296,6 @@ PROFILE_SECRET_ENV="OPENAI_API_KEY"
 PROFILE_SECRET_MANAGED="openai_api_key"
 PROFILE_CREDENTIAL_ENV=""
 PROFILE_DEFAULT_MODEL=""
-PROFILE_LOGIN_KIND="none"
 
 validate_profile_id() {
   case "$1" in
@@ -321,7 +320,6 @@ resolve_auth_profile() {
   PROFILE_SECRET_MANAGED=""
   PROFILE_CREDENTIAL_ENV=""
   PROFILE_DEFAULT_MODEL=""
-  PROFILE_LOGIN_KIND="none"
   # shellcheck disable=SC1090
   source "${manifest}"
 
