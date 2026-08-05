@@ -24,8 +24,9 @@ This does not make unsafe code safe, and it does not hide files that you place i
 - Bash 4.4 or newer. On macOS, install it with Homebrew; the launcher will use
   a compatible Bash from `$SHELL` automatically when `/usr/bin/env bash` finds
   the older system Bash.
-- An OpenAI API key, provided when prompted, through `OPENAI_API_KEY`, or
-  through `OPENAI_API_KEY_FILE`.
+- Credentials for one supported authentication profile: an OpenAI API key, a
+  ChatGPT subscription, or the external credentials required by an experimental
+  profile.
 
 ## How To Run It
 
@@ -36,9 +37,10 @@ cd /path/to/your/project
 /path/to/codex/myCodex
 ```
 
-On first run, `myCodex` asks for your `OPENAI_API_KEY` if no other source is
-configured, stores the entered value under the recipe's `.secrets/`, creates an
-internal LiteLLM key, starts the stack, and attaches you to the Codex session.
+With no selected profile, normal startup keeps the compatible `openai` default:
+`myCodex` asks for your `OPENAI_API_KEY`, stores the entered value under the
+recipe's `.secrets/`, creates an internal LiteLLM key, starts the stack, and
+attaches you to the Codex session. Use `myCodex login` to choose another profile.
 
 ### Secret sources
 
@@ -79,6 +81,7 @@ Common commands:
 /path/to/codex/myCodex stop
 /path/to/codex/myCodex restart
 /path/to/codex/myCodex exec bash
+/path/to/codex/myCodex auth status
 ```
 
 To see the resolved configuration — project name, image, container home/workdir,
@@ -99,34 +102,73 @@ MYCODEX_SHARED_STATE=1 /path/to/codex/myCodex
 
 ## Authentication Profiles
 
-`MYCODEX_AUTH` selects how the LiteLLM sidecar authenticates to the model
-provider. The agent container is unaffected by the choice — it always reaches the
-model only through the sidecar with the internal proxy key — so switching
-profiles never widens what the agent itself can reach.
+Authentication is selected once through `myCodex login` and then remembered:
+
+```sh
+/path/to/codex/myCodex login chatgpt
+/path/to/codex/myCodex                 # uses chatgpt from now on
+```
+
+Run `myCodex login` without a profile to use the stored selection or, when none
+exists, choose interactively. The selected profile is written atomically to
+`.secrets/auth_profile` only after credential acquisition succeeds. Failed or
+cancelled login therefore leaves the previous selection intact.
+
+The agent container is unaffected by the choice: it always reaches the model
+only through the sidecar with the internal proxy key, so switching profiles does
+not widen the agent's egress policy.
 
 | Profile | Upstream auth | How you provide it |
 | --- | --- | --- |
-| `openai` (default) | OpenAI API key | `OPENAI_API_KEY` (prompt / env / `_FILE`) |
-| `chatgpt` | ChatGPT subscription (OAuth) | `myCodex login` — one-time device login |
+| `openai` (compatibility default) | OpenAI API key | `myCodex login openai` (prompt / env / `_FILE`) |
+| `chatgpt` | ChatGPT subscription (OAuth) | `myCodex login chatgpt` — one-time device login |
 | `vertex` (scaffold) | Google Vertex AI service account | `MYCODEX_VERTEX_CREDENTIALS=/path/to/sa.json` + `VERTEXAI_PROJECT` |
 
 Each non-default profile lives under `auth-profiles/<id>/` as data — a compose
 overlay, a LiteLLM config, and its own egress policy whose agent block is
 identical to the default (only the sidecar's upstream hosts change). Adding a new
 API-key provider (e.g. Anthropic) is a new profile directory with no wrapper
-changes.
+dispatch changes. `PROFILE_DISPLAY_NAME` in `profile.env` supplies its label in
+the interactive selector and `auth list`.
 
-Switching an existing project between profiles requires recreating the stack, so
-run `myCodex down` then `myCodex up` (or just `myCodex up`, which recreates). The
-container is labeled with the profile that created it, and `start`/`restart` —
-which do not recreate containers — refuse a mismatched profile rather than run
-one profile's config under another's egress policy.
+Profile management commands are local and do not contact a provider unless they
+perform `login`:
+
+```sh
+/path/to/codex/myCodex auth list
+/path/to/codex/myCodex auth status
+/path/to/codex/myCodex logout chatgpt
+```
+
+`logout` removes only credentials managed under this recipe's `.secrets/` and
+clears a matching stored selection. It never deletes an external credential
+file or changes the caller's environment. Existing containers are not stopped;
+bring a running project down when it must no longer retain its current session.
+
+For automation or a temporary exception, put `--auth <profile>` first on the
+command line, or set `MYCODEX_AUTH`. These override the stored selection for one
+invocation and are not persisted:
+
+```sh
+/path/to/codex/myCodex --auth openai info
+MYCODEX_AUTH=vertex /path/to/codex/myCodex up
+```
+
+Runtime precedence is `--auth`, `MYCODEX_AUTH`, the stored profile, then the
+`openai` compatibility default. A profile argument to `login` is the explicit
+login target and becomes the stored profile only on success.
+
+Switching an existing project between profiles requires recreating the stack.
+The Codex container is labeled with the profile that created it. `login`,
+`start`, `restart`, and implicit attach refuse to replace a container created for
+another profile; run `myCodex down` first. An explicit `myCodex up` remains the
+operation that may apply a changed profile by recreating the stack.
 
 ### ChatGPT subscription
 
 ```sh
-MYCODEX_AUTH=chatgpt /path/to/codex/myCodex login   # one-time; opens a device login
-MYCODEX_AUTH=chatgpt /path/to/codex/myCodex          # then run as usual
+/path/to/codex/myCodex login chatgpt   # one-time device login and selection
+/path/to/codex/myCodex                 # then run normally, with no environment flag
 ```
 
 `login` surfaces LiteLLM's own OAuth device flow: it prints a URL and a code —
@@ -134,17 +176,23 @@ open the URL, sign in, enter the code. LiteLLM stores the token under the recipe
 `.secrets/chatgpt-token/` (mounted only into the sidecar, never the agent) and
 refreshes it automatically thereafter. If you already have a Codex
 `~/.codex/auth.json`, import it instead with
-`MYCODEX_CHATGPT_AUTH=~/.codex/auth.json MYCODEX_AUTH=chatgpt ./myCodex login`.
+`MYCODEX_CHATGPT_AUTH=~/.codex/auth.json ./myCodex login chatgpt`.
 
-Login first gives LiteLLM up to 60 seconds to become healthy. It then makes one
-device-flow request and allows up to 15 minutes for browser login and MFA. New
-LiteLLM output is followed so the current URL and code remain visible, and a
-status line is printed every 30 seconds while authorization is pending. Press
-Ctrl-C to cancel. Configuration, network, or provider failures terminate that
-single request and are reported immediately; the wrapper never creates new
-device codes in a retry loop. If local startup or provider policy requires a
-different limit, set `MYCODEX_CHATGPT_READY_TIMEOUT` or
-`MYCODEX_CHATGPT_LOGIN_TIMEOUT` to a positive number of seconds.
+Login starts only the LiteLLM service; it does not create or replace the Codex
+container. Output is followed from the beginning of the current attempt before
+readiness is checked, so a device URL/code or startup failure cannot be hidden
+behind the readiness wait. The readiness probe runs over localhost inside the
+sidecar, reports its current failure while retrying, and has a 60-second ceiling.
+
+Once ready, the wrapper makes exactly one device-flow request and allows up to 15
+minutes for browser login and MFA. A status line is printed every 30 seconds
+while authorization is pending. Press Ctrl-C to cancel. Configuration, network,
+or provider failures terminate that request and are reported directly; the
+wrapper never creates device codes in a retry loop. A sidecar started solely for
+login is removed afterwards, while an already-running sidecar is left running.
+If local startup or provider policy requires a different limit, set
+`MYCODEX_CHATGPT_READY_TIMEOUT` or `MYCODEX_CHATGPT_LOGIN_TIMEOUT` to a positive
+number of seconds.
 
 > The `chatgpt` and `vertex` profiles are new and depend on provider-side
 > behavior (LiteLLM's `chatgpt/` provider and a chatgpt-capable image; a real
@@ -243,7 +291,12 @@ configuration and recreates both services on the next `up`.
 
 ## How It's Assembled
 
-The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstream [myCodex](https://github.com/emsi/myCodex) project; the top-level `myCodex` is a thin wrapper that adds the secrets and points the launcher at vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml` defines the two services (both images pinned by digest) and `vaka.yaml` is the egress policy.
+The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstream
+[myCodex](https://github.com/emsi/myCodex) project. The top-level `myCodex`
+wrapper manages provider selection and credentials and points the launcher at
+vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml`
+defines the two services, using a portable SemVer workstation image and a
+digest-pinned LiteLLM image; `vaka.yaml` defines the egress policy.
 
 > Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.
 
@@ -260,8 +313,9 @@ validation. Maintainers can run them from the registry checkout with:
 codex/tests/run.sh
 ```
 
-The wrapper and profile tests are self-contained (`test_wrapper.sh` covers secret
-resolution; `test_profiles.sh` covers auth-profile dispatch, the identical-agent-
-egress invariant across every profile policy, and the credential handlers). The
-Compose rendering test (`test_compose.py`, which also renders the profile
-overlays) additionally requires the Docker CLI with Compose.
+The wrapper and profile tests are self-contained. `test_wrapper.sh` covers secret
+resolution; `test_profiles.sh` covers profile state and precedence, dispatch,
+the identical-agent-egress invariant, and credential handlers; `test_login.sh`
+covers sidecar scope, early log visibility, readiness diagnostics, timeouts, and
+process/service cleanup. The Compose rendering test (`test_compose.py`, which
+also renders the profile overlays) additionally requires Docker Compose.

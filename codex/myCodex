@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
 #
-# It adds only what upstream does not provide: it collects the provider API key,
-# maintains an internal LiteLLM proxy key, and routes every Compose call through
-# vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
-# path-parity workdir, per-project state (--private-env), attach/exec, readiness
-# — is handled by the vendored launcher unchanged.
+# It adds only what upstream does not provide: it selects and acquires provider
+# credentials, maintains an internal LiteLLM proxy key, and routes every Compose
+# call through vaka for egress enforcement (MYCODEX_COMPOSE). Everything else —
+# host identity, path-parity workdir, per-project state (--private-env),
+# attach/exec, and readiness — is handled by the vendored launcher unchanged.
 
 recipe_bash_is_supported() {
   (( BASH_VERSINFO[0] > 4 ||
@@ -265,10 +265,10 @@ die() {
 # ---------------------------------------------------------------------------
 # Auth profiles
 #
-# MYCODEX_AUTH selects how the LiteLLM sidecar authenticates upstream. The agent
-# container is auth-agnostic — it always speaks to the sidecar with the internal
-# proxy key — so only the sidecar's provider config, credential, and egress
-# change between profiles.
+# The persisted selection chooses how LiteLLM authenticates upstream;
+# --auth/MYCODEX_AUTH can override it for one invocation. The agent container is
+# auth-agnostic: it always speaks to the sidecar with the internal proxy key, so
+# only the sidecar's provider config, credential, and egress change.
 #
 # The default profile "openai" is realized by the recipe's root files
 # (docker-compose.yaml, vaka.yaml, litellm.config.yaml) and needs no overlay, so
