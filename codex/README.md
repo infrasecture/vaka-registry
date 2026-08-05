@@ -37,10 +37,12 @@ cd /path/to/your/project
 /path/to/codex/myCodex
 ```
 
-With no selected profile, normal startup keeps the compatible `openai` default:
-`myCodex` asks for your `OPENAI_API_KEY`, stores the entered value under the
-recipe's `.secrets/`, creates an internal LiteLLM key, starts the stack, and
-attaches you to the Codex session. Use `myCodex login` to choose another profile.
+On the first interactive startup, `myCodex` asks how to authenticate before it
+asks for any provider credential. ChatGPT subscription login is the first
+choice; OpenAI API key and the available experimental profiles remain explicit
+alternatives. After authentication succeeds, the choice is stored under the
+recipe's `.secrets/`, the stack starts, and the launcher attaches to Codex.
+Later invocations reuse that selection without prompting.
 
 ### Secret sources
 
@@ -102,7 +104,8 @@ MYCODEX_SHARED_STATE=1 /path/to/codex/myCodex
 
 ## Authentication Profiles
 
-Authentication is selected once through `myCodex login` and then remembered:
+Authentication is selected during first startup or explicitly through
+`myCodex login`, and then remembered:
 
 ```sh
 /path/to/codex/myCodex login chatgpt
@@ -110,9 +113,11 @@ Authentication is selected once through `myCodex login` and then remembered:
 ```
 
 Run `myCodex login` without a profile to use the stored selection or, when none
-exists, choose interactively. The selected profile is written atomically to
-`.secrets/auth_profile` only after credential acquisition succeeds. Failed or
-cancelled login therefore leaves the previous selection intact.
+exists, choose interactively. First startup follows the same setup path and then
+continues the command that triggered it. The selected profile is written
+atomically to `.secrets/auth_profile` only after credential acquisition
+succeeds. Failed or cancelled setup therefore leaves the previous selection
+intact.
 
 The agent container is unaffected by the choice: it always reaches the model
 only through the sidecar with the internal proxy key, so switching profiles does
@@ -120,16 +125,17 @@ not widen the agent's egress policy.
 
 | Profile | Upstream auth | How you provide it |
 | --- | --- | --- |
-| `openai` (compatibility default) | OpenAI API key | `myCodex login openai` (prompt / env / `_FILE`) |
-| `chatgpt` | ChatGPT subscription (OAuth) | `myCodex login chatgpt` — one-time device login |
+| `chatgpt` (first onboarding choice) | ChatGPT subscription (OAuth) | `myCodex login chatgpt` — one-time device login |
+| `openai` | OpenAI API key | `myCodex login openai` (prompt / env / `_FILE`) |
 | `vertex` (scaffold) | Google Vertex AI service account | `MYCODEX_VERTEX_CREDENTIALS=/path/to/sa.json` + `VERTEXAI_PROJECT` |
 
-Each non-default profile lives under `auth-profiles/<id>/` as data — a compose
-overlay, a LiteLLM config, and its own egress policy whose agent block is
-identical to the default (only the sidecar's upstream hosts change). Adding a new
-API-key provider (e.g. Anthropic) is a new profile directory with no wrapper
-dispatch changes. `PROFILE_DISPLAY_NAME` in `profile.env` supplies its label in
-the interactive selector and `auth list`.
+Each profile other than the built-in `openai` profile lives under
+`auth-profiles/<id>/` as data — a compose overlay, a LiteLLM config, and its own
+egress policy whose agent block is identical to the root policy (only the
+sidecar's upstream hosts change). Adding a new API-key provider (e.g. Anthropic)
+is a new profile directory with no wrapper dispatch changes.
+`PROFILE_DISPLAY_NAME` in `profile.env` supplies its label in the interactive
+selector and `auth list`.
 
 Profile management commands are local and do not contact a provider unless they
 perform `login`:
@@ -154,9 +160,13 @@ invocation and are not persisted:
 MYCODEX_AUTH=vertex /path/to/codex/myCodex up
 ```
 
-Runtime precedence is `--auth`, `MYCODEX_AUTH`, the stored profile, then the
-`openai` compatibility default. A profile argument to `login` is the explicit
-login target and becomes the stored profile only on success.
+Runtime precedence is `--auth`, `MYCODEX_AUTH`, then the stored profile. With no
+selection, an interactive starting command opens the profile chooser. A
+headless starting command accepts an already supplied or managed OpenAI
+credential for backward-compatible automation, without persisting that implicit
+choice; otherwise it fails with an explicit setup instruction. A profile
+argument to `login` is the explicit login target and becomes the stored profile
+only on success.
 
 Switching an existing project between profiles requires recreating the stack.
 The Codex container is labeled with the profile that created it. `login`,
@@ -194,10 +204,10 @@ If local startup or provider policy requires a different limit, set
 `MYCODEX_CHATGPT_READY_TIMEOUT` or `MYCODEX_CHATGPT_LOGIN_TIMEOUT` to a positive
 number of seconds.
 
-> The `chatgpt` and `vertex` profiles are new and depend on provider-side
+> The `chatgpt` and `vertex` profiles depend on provider-side
 > behavior (LiteLLM's `chatgpt/` provider and a chatgpt-capable image; a real
-> Vertex project). Verify them in your environment before relying on them; the
-> default `openai` profile is unchanged.
+> Vertex project). Verify them in your environment before relying on them. The
+> direct OpenAI API-key profile remains available as an explicit choice.
 
 ## How The Network Boundary Works
 
@@ -314,8 +324,10 @@ codex/tests/run.sh
 ```
 
 The wrapper and profile tests are self-contained. `test_wrapper.sh` covers secret
-resolution; `test_profiles.sh` covers profile state and precedence, dispatch,
-the identical-agent-egress invariant, and credential handlers; `test_login.sh`
-covers sidecar scope, early log visibility, readiness diagnostics, timeouts, and
-process/service cleanup. The Compose rendering test (`test_compose.py`, which
-also renders the profile overlays) additionally requires Docker Compose.
+resolution; `test_onboarding.py` exercises the real pseudo-terminal first-run
+chooser and headless behavior; `test_profiles.sh` covers profile state and
+precedence, dispatch, the identical-agent-egress invariant, and credential
+handlers; `test_login.sh` covers sidecar scope, early log visibility, readiness
+diagnostics, timeouts, and process/service cleanup. The Compose rendering test
+(`test_compose.py`, which also renders the profile overlays) additionally
+requires Docker Compose.

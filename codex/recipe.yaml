@@ -9,10 +9,10 @@ minVakaVersion: 0.0.3
 env:
   - name: MYCODEX_AUTH
     required: false
-    description: "One-invocation auth-profile override for automation; interactive users select and persist openai, chatgpt, or vertex through myCodex login"
+    description: "One-invocation auth-profile override for automation; interactive first startup or myCodex login selects and persists chatgpt, openai, or vertex"
   - name: OPENAI_API_KEY
     required: false
-    description: Model provider API key consumed only by LiteLLM in the default openai profile; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely
+    description: Model provider API key consumed only by LiteLLM in the openai profile; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile is selected
   - name: MYCODEX_MODEL
     required: false
     description: Optional model pin passed to Codex; auth profiles that enumerate models default it, the openai profile leaves it unset (LiteLLM wildcard)
