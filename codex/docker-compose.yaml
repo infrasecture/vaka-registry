@@ -42,10 +42,12 @@ services:
       CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
       CODEX_BYOBU_SESSION: codex
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
-      # Optional model pin for codex-prestart.sh. Empty in the default (openai)
-      # profile, where LiteLLM serves any model via a wildcard; auth profiles that
-      # enumerate specific models set it so Codex requests one the gateway serves.
+      # Optional user/profile model pin for codex-prestart.sh. Empty profiles let
+      # Codex select its current default from its own model catalog.
       MYCODEX_MODEL: ${MYCODEX_MODEL:-}
+      # One-time migration hint for a model pin written by an older recipe.
+      # prestart removes only an exact generated line and preserves user choices.
+      MYCODEX_LEGACY_MODEL: ${MYCODEX_LEGACY_MODEL:-}
       # The agent reaches the model only through the LiteLLM sidecar; this is
       # the internal proxy key, never the upstream provider key.
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}

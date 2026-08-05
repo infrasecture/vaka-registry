@@ -45,9 +45,26 @@ run_prestart
 
 # --- profile with a pin: MYCODEX_MODEL set -> replaces the user's model --------
 seed_config
-run_prestart MYCODEX_MODEL=gpt-5.3-codex
-grep -Fxq 'model = "gpt-5.3-codex"' "${CONFIG}" || fail "pin was not written"
+run_prestart MYCODEX_MODEL=gpt-5.6-terra
+grep -Fxq 'model = "gpt-5.6-terra"' "${CONFIG}" || fail "pin was not written"
 grep -Fxq 'model = "user-choice"' "${CONFIG}" && fail "pin did not replace the user's model line"
 [[ "$(grep -c '^model = ' "${CONFIG}")" == "1" ]] || fail "expected exactly one top-level model line"
 
-echo "PASS: prestart preserves the user's model by default and pins it only when set"
+# --- profile migration: remove only the exact old recipe-generated pin ------
+seed_config
+sed 's/model = "user-choice"/model = "gpt-5.3-codex"/' "${CONFIG}" > "${CONFIG}.legacy"
+mv "${CONFIG}.legacy" "${CONFIG}"
+run_prestart MYCODEX_LEGACY_MODEL=gpt-5.3-codex
+grep -Fq 'model = ' "${CONFIG}" && fail "legacy generated model pin was not removed"
+
+seed_config
+run_prestart MYCODEX_LEGACY_MODEL=gpt-5.3-codex
+grep -Fxq 'model = "user-choice"' "${CONFIG}" \
+  || fail "legacy migration removed a different user-selected model"
+
+seed_config
+run_prestart MYCODEX_MODEL=gpt-5.6-sol MYCODEX_LEGACY_MODEL=gpt-5.3-codex
+grep -Fxq 'model = "gpt-5.6-sol"' "${CONFIG}" \
+  || fail "explicit model pin did not take precedence over legacy migration"
+
+echo "PASS: prestart preserves user models, honors explicit pins, and removes only its legacy pin"

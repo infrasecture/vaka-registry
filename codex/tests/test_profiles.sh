@@ -28,6 +28,7 @@ printf '%s\n' "$@" > "${MYCODEX_TEST_CAPTURE}.argv"
   printf 'MYCODEX_COMPOSE=%s\n' "${MYCODEX_COMPOSE:-}"
   printf 'MYCODEX_LITELLM_CONFIG=%s\n' "${MYCODEX_LITELLM_CONFIG:-}"
   printf 'MYCODEX_MODEL=%s\n' "${MYCODEX_MODEL:-}"
+  printf 'MYCODEX_LEGACY_MODEL=%s\n' "${MYCODEX_LEGACY_MODEL:-}"
   printf 'MYCODEX_CREDENTIAL_FILE=%s\n' "${MYCODEX_CREDENTIAL_FILE:-}"
   printf 'OPENAI_API_KEY_SET=%s\n' "${OPENAI_API_KEY:+yes}"
   printf 'LITELLM_MASTER_KEY_SET=%s\n' "${LITELLM_MASTER_KEY:+yes}"
@@ -132,14 +133,16 @@ grep -Fq "auth-profiles/chatgpt/vaka.yaml compose" "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not select its egress policy"
 grep -Fq "auth-profiles/chatgpt/litellm.config.yaml" "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not select its litellm config"
-grep -Fxq 'MYCODEX_MODEL=gpt-5.3-codex' "${chatgpt_capture}.env" \
-  || fail "chatgpt profile did not pin the default model"
+grep -Fxq 'MYCODEX_MODEL=' "${chatgpt_capture}.env" \
+  || fail "chatgpt profile unexpectedly pinned a default model"
+grep -Fxq 'MYCODEX_LEGACY_MODEL=gpt-5.3-codex' "${chatgpt_capture}.env" \
+  || fail "chatgpt profile did not request migration of its old generated pin"
 grep -Fxq 'OPENAI_API_KEY_SET=' "${chatgpt_capture}.env" \
   || fail "chatgpt profile must not require OPENAI_API_KEY"
 grep -Fxq 'LITELLM_MASTER_KEY_SET=yes' "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not mint the internal proxy key"
 [[ -d "${RECIPE}/.secrets/chatgpt-token" ]] || fail "chatgpt profile did not create the token dir"
-echo "ok: chatgpt profile switches overlay/config/policy/model without a provider key"
+echo "ok: chatgpt profile switches overlay/config/policy without forcing Codex's model"
 
 # --- profile-switch guard: no-op when no stack is running ------------------
 start_capture="${TMP}/capture-start"

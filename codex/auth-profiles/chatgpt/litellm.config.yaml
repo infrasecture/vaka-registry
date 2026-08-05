@@ -4,18 +4,33 @@
 # because the chatgpt/ provider does not support a wildcard route; the
 # model_name each client requests must appear here.
 model_list:
-  - model_name: gpt-5.3-codex
+  - model_name: gpt-5.6-sol
     model_info: { mode: responses }
     litellm_params:
-      model: chatgpt/gpt-5.3-codex
-  - model_name: gpt-5.4
+      model: chatgpt/gpt-5.6-sol
+  - model_name: gpt-5.6-terra
     model_info: { mode: responses }
     litellm_params:
-      model: chatgpt/gpt-5.4
+      model: chatgpt/gpt-5.6-terra
+  - model_name: gpt-5.6-luna
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-5.6-luna
+  - model_name: gpt-5.5
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-5.5
+  - model_name: gpt-5.2
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-5.2
 
 litellm_settings:
   telemetry: False
-  drop_params: True
+  # Do not ask LiteLLM's generic parameter layer to silently discard fields.
+  # The native ChatGPT Responses adapter forwards the Codex fields exercised by
+  # this recipe: reasoning and function, custom, and hosted web-search tools.
+  drop_params: False
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

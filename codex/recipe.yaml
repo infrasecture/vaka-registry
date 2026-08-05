@@ -15,7 +15,7 @@ env:
     description: Model provider API key consumed only by LiteLLM in the openai profile; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile is selected
   - name: MYCODEX_MODEL
     required: false
-    description: Optional model pin passed to Codex; auth profiles that enumerate models default it, the openai profile leaves it unset (LiteLLM wildcard)
+    description: Optional explicit model pin passed to Codex; the OpenAI and ChatGPT profiles otherwise leave selection to Codex, while experimental profiles may define their own default
   - name: LITELLM_MASTER_KEY
     required: false
     description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE or generates and persists one

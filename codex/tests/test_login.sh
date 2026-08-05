@@ -103,6 +103,7 @@ case " $* " in
 esac
 
 printf 'request\n' >> "${MYCODEX_TEST_REQUESTS:?}"
+printf '%s\n' "${@: -2:1}" >> "${MYCODEX_TEST_MODELS:?}"
 case "${MYCODEX_TEST_MODE:?}" in
   fail)
     echo "curl: simulated permanent provider failure" >&2
@@ -130,6 +131,7 @@ chmod 755 "${FAKE_BIN}/docker"
 
 TOKEN_FILE="${RECIPE}/.secrets/chatgpt-token/auth.json"
 REQUESTS="${TMP}/requests"
+MODELS="${TMP}/models"
 LAUNCHER_CALLS="${TMP}/launcher-calls"
 LOG_CLEANED="${TMP}/log-cleaned"
 PROBE_CLEANED="${TMP}/probe-cleaned"
@@ -139,7 +141,7 @@ SERVICE_PAUSED="${TMP}/service-paused"
 CONTAINER_ID="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 reset_case() {
-  rm -f -- "${TOKEN_FILE}" "${REQUESTS}" "${LAUNCHER_CALLS}" \
+  rm -f -- "${TOKEN_FILE}" "${REQUESTS}" "${MODELS}" "${LAUNCHER_CALLS}" \
     "${LOG_CLEANED}" "${PROBE_CLEANED}" "${SERVICE_EXISTS}" \
     "${SERVICE_STOPPED}" "${SERVICE_PAUSED}"
 }
@@ -163,6 +165,7 @@ run_login() {
       MYCODEX_TEST_MODE="${mode}" \
       MYCODEX_TEST_TOKEN_FILE="${TOKEN_FILE}" \
       MYCODEX_TEST_REQUESTS="${REQUESTS}" \
+      MYCODEX_TEST_MODELS="${MODELS}" \
       MYCODEX_TEST_LAUNCHER_CALLS="${LAUNCHER_CALLS}" \
       MYCODEX_TEST_LOG_CLEANED="${LOG_CLEANED}" \
       MYCODEX_TEST_PROBE_CLEANED="${PROBE_CLEANED}" \
@@ -237,6 +240,8 @@ output="$(run_login success 5 30 2>&1)" \
   || fail "login rejected a completed device flow: ${output}"
 grep -Fq 'ChatGPT login complete' <<< "${output}" || fail "success was not reported"
 [[ "$(request_count)" == "1" ]] || fail "successful device flow used more than one request"
+grep -Fxq 'gpt-5.6-sol' "${MODELS}" \
+  || fail "device login did not use the profile's dedicated login model"
 [[ -f "${LOG_CLEANED}" ]] || fail "log follower survived successful login"
 [[ -f "${PROBE_CLEANED}" ]] || fail "provider request survived successful login"
 echo "ok: successful login uses one request and cleans up child processes"

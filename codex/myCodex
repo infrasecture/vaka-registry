@@ -299,6 +299,8 @@ PROFILE_SECRET_ENV="OPENAI_API_KEY"
 PROFILE_SECRET_MANAGED="openai_api_key"
 PROFILE_CREDENTIAL_ENV=""
 PROFILE_DEFAULT_MODEL=""
+PROFILE_LOGIN_MODEL=""
+PROFILE_LEGACY_DEFAULT_MODEL=""
 PROFILE_DISPLAY_NAME="OpenAI API key"
 
 validate_profile_id() {
@@ -460,6 +462,8 @@ resolve_auth_profile() {
   PROFILE_SECRET_MANAGED=""
   PROFILE_CREDENTIAL_ENV=""
   PROFILE_DEFAULT_MODEL=""
+  PROFILE_LOGIN_MODEL=""
+  PROFILE_LEGACY_DEFAULT_MODEL=""
   PROFILE_DISPLAY_NAME="${MYCODEX_AUTH}"
   # shellcheck disable=SC1090
   source "${manifest}"
@@ -1129,7 +1133,9 @@ run_oauth_device_login() (
   echo "myCodex: a verification URL and code will appear below — open the URL," >&2
   echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
 
-  local model="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL:-gpt-5.3-codex}}"
+  local model="${MYCODEX_MODEL:-${PROFILE_LOGIN_MODEL:-${PROFILE_DEFAULT_MODEL:-}}}"
+  [[ -n "${model}" ]] \
+    || die "auth profile '${MYCODEX_AUTH}' does not define a model for device login"
   local ready_timeout login_timeout
   ready_timeout="$(read_positive_timeout MYCODEX_CHATGPT_READY_TIMEOUT 60)"
   login_timeout="$(read_positive_timeout MYCODEX_CHATGPT_LOGIN_TIMEOUT 900)"
@@ -1333,6 +1339,10 @@ if [[ -n "${PROFILE_LITELLM_CONFIG}" ]]; then
 fi
 if [[ -n "${MYCODEX_MODEL:-}" || -n "${PROFILE_DEFAULT_MODEL}" ]]; then
   export MYCODEX_MODEL="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL}}"
+fi
+unset MYCODEX_LEGACY_MODEL
+if [[ -z "${MYCODEX_MODEL:-}" && -n "${PROFILE_LEGACY_DEFAULT_MODEL}" ]]; then
+  export MYCODEX_LEGACY_MODEL="${PROFILE_LEGACY_DEFAULT_MODEL}"
 fi
 
 # Authentication commands are recipe-level operations, not Compose verbs.

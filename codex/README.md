@@ -204,6 +204,41 @@ If local startup or provider policy requires a different limit, set
 `MYCODEX_CHATGPT_READY_TIMEOUT` or `MYCODEX_CHATGPT_LOGIN_TIMEOUT` to a positive
 number of seconds.
 
+#### Models, reasoning, and tools
+
+The ChatGPT profile does not force a default model. Codex selects the current
+default from the catalog bundled with the workstation image, and a model chosen
+inside Codex remains the user's choice. Set `MYCODEX_MODEL` only when an
+explicit per-invocation pin is wanted.
+
+The profile routes the complete model set exposed by Codex `0.146.0` for this
+backend:
+
+| Model | Codex reasoning choices |
+| --- | --- |
+| `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-5.6-terra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-5.6-luna` | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-5.5` | `low`, `medium`, `high`, `xhigh` |
+| `gpt-5.2` | `low`, `medium`, `high`, `xhigh` |
+
+`ultra` is a Codex orchestration mode: Codex sends upstream reasoning effort
+`max` and enables its automatic task-delegation behavior. LiteLLM receives and
+preserves every wire-level effort listed for the selected model.
+
+The gateway uses LiteLLM's native ChatGPT Responses adapter. It preserves
+Codex's function tools, custom tools such as shell/apply-patch, and hosted
+`web_search` requests, including text-and-image search fields and requested
+search results. The profile does not enable LiteLLM's generic silent parameter
+dropping; the pinned adapter's tested request contract is enforced by the
+recipe test suite. Actual model and hosted-tool availability still depends on
+the signed-in ChatGPT account and provider policy.
+
+Earlier previews of this profile wrote `model = "gpt-5.3-codex"` into persistent
+Codex config. On the first start after updating, the recipe removes only that
+exact generated line when no explicit `MYCODEX_MODEL` is set. Other model lines
+and explicit pins are preserved.
+
 > The `chatgpt` and `vertex` profiles depend on provider-side
 > behavior (LiteLLM's `chatgpt/` provider and a chatgpt-capable image; a real
 > Vertex project). Verify them in your environment before relying on them. The
