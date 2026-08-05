@@ -434,6 +434,11 @@ launcher() {
   "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"
 }
 
+follow_litellm_logs() {
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" \
+    "${private_env[@]}" "${profile_files[@]}" logs --tail=0 -f litellm
+}
+
 # `myCodex login` primes the selected profile's credential. For env-secret /
 # credential-file this just resolves and stores the input; for oauth-device-native
 # it surfaces LiteLLM's own device flow (which mints and later refreshes the
@@ -467,35 +472,142 @@ chatgpt_auth_complete() {
   grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"[^"]+"' "${file}"
 }
 
-# Poll LiteLLM until it accepts connections on 4000. `up -d` returns once the
-# container has started, not once the proxy is serving, so probing before this
-# would hit connection-refused and never trigger the device flow.
+# Poll LiteLLM until it returns a successful liveliness response. `up -d`
+# returns once containers have started, not once the proxy is serving. Bound the
+# whole readiness phase by wall-clock time; an individual curl timeout must not
+# silently multiply the advertised deadline.
 wait_for_litellm_ready() {
-  local waited=0
-  while ! docker exec "${CODEX_CONTAINER_NAME}" \
-      curl -s -o /dev/null -m 5 http://litellm:4000/health/liveliness >/dev/null 2>&1; do
-    sleep 3
-    waited=$((waited + 3))
-    (( waited >= 90 )) && return 1
+  local timeout="$1"
+  local deadline=$((SECONDS + timeout))
+  local remaining request_timeout sleep_for
+
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    request_timeout=3
+    (( remaining < request_timeout )) && request_timeout="${remaining}"
+
+    if docker exec "${CODEX_CONTAINER_NAME}" \
+        curl --fail --silent --show-error --output /dev/null \
+          --max-time "${request_timeout}" \
+          http://litellm:4000/health/liveliness >/dev/null 2>&1; then
+      return 0
+    fi
+
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || break
+    sleep_for=2
+    (( remaining < sleep_for )) && sleep_for="${remaining}"
+    sleep "${sleep_for}"
   done
-  return 0
+  return 1
 }
 
-# Send one chatgpt-model request to trigger the provider's device flow. The
-# request blocks server-side until the user completes the browser step (or the
-# provider times out), so it runs in the background; the caller watches auth.json
-# and re-triggers if this exits early. docker exec (not the launcher's `exec`,
-# which forces a TTY) so it works detached.
+read_positive_timeout() {
+  local name="$1"
+  local fallback="$2"
+  local value="${!name:-${fallback}}"
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] \
+    || die "${name} must be a positive whole number of seconds (got '${value}')"
+  printf '%s' "${value}"
+}
+
+# Send exactly one request to trigger LiteLLM's provider-owned device flow. It
+# remains pending while the user completes browser login and MFA. The caller
+# watches both auth.json and this process: an early request failure is a real
+# error, not a reason to silently create another device code.
 CHATGPT_PROBE_PID=0
 trigger_chatgpt_device_flow() {
   local model="$1"
+  local timeout="$2"
+  local payload
+
+  case "${model}" in
+    ''|*[!A-Za-z0-9._:/@+-]*)
+      die "ChatGPT login model contains unsupported characters: '${model}'"
+      ;;
+  esac
+  printf -v payload '{"model":"%s","input":"login probe"}' "${model}"
+
+  # Expand OPENAI_API_KEY inside the container so the long-lived host-side
+  # `docker exec` process does not expose the proxy key in its argv.
   docker exec "${CODEX_CONTAINER_NAME}" bash -lc \
-    'curl -sS -m 900 http://litellm:4000/v1/responses \
-       -H "Authorization: Bearer ${OPENAI_API_KEY}" -H "Content-Type: application/json" \
-       -d '"'"'{"model":"'"${model}"'","input":"login probe"}'"'"' >/dev/null 2>&1' \
-    >/dev/null 2>&1 &
+    'exec curl --fail --silent --show-error --output /dev/null \
+      --max-time "$1" \
+      http://litellm:4000/v1/responses \
+      --header "Authorization: Bearer ${OPENAI_API_KEY}" \
+      --header "Content-Type: application/json" \
+      --data "$2"' \
+    _ "${timeout}" "${payload}" &
   CHATGPT_PROBE_PID=$!
 }
+
+stop_login_child() {
+  local pid="$1"
+  (( pid > 0 )) || return 0
+  kill "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+}
+
+run_chatgpt_device_flow() (
+  local token_file="$1"
+  local model="$2"
+  local ready_timeout="$3"
+  local login_timeout="$4"
+  local log_pid=0
+  local probe_pid=0
+
+  trap 'stop_login_child "${log_pid}"; stop_login_child "${probe_pid}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+
+  echo "myCodex: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
+  wait_for_litellm_ready "${ready_timeout}" \
+    || die "LiteLLM did not become ready within ${ready_timeout}s; inspect '${SCRIPT_DIR}/myCodex logs litellm' and retry"
+
+  # Follow only new output so a code from an earlier login attempt cannot be
+  # mistaken for the current one.
+  follow_litellm_logs &
+  log_pid=$!
+
+  local deadline=$((SECONDS + login_timeout))
+  local next_status=$((SECONDS + 30))
+  local remaining probe_status sleep_for
+  local request_timeout=$((login_timeout + 5))
+
+  echo "myCodex: waiting up to ${login_timeout}s for browser authorization and MFA; press Ctrl-C to cancel." >&2
+  trigger_chatgpt_device_flow "${model}" "${request_timeout}"
+  probe_pid="${CHATGPT_PROBE_PID}"
+
+  while ! chatgpt_auth_complete "${token_file}"; do
+    if (( SECONDS >= deadline )); then
+      die "ChatGPT device code expired after ${login_timeout}s; rerun '${SCRIPT_DIR}/myCodex login' to request a new code"
+    fi
+
+    if ! kill -0 "${probe_pid}" 2>/dev/null; then
+      if wait "${probe_pid}"; then
+        probe_status=0
+      else
+        probe_status=$?
+      fi
+      probe_pid=0
+      chatgpt_auth_complete "${token_file}" && break
+      die "ChatGPT device-login request ended before credentials were issued (exit ${probe_status}); review the LiteLLM output above and retry"
+    fi
+
+    if (( SECONDS >= next_status )); then
+      remaining=$((deadline - SECONDS))
+      echo "myCodex: still waiting for browser authorization (${remaining}s remaining; Ctrl-C cancels)." >&2
+      next_status=$((SECONDS + 30))
+    fi
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || continue
+    sleep_for=2
+    (( remaining < sleep_for )) && sleep_for="${remaining}"
+    sleep "${sleep_for}"
+  done
+
+  echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
+)
 
 run_oauth_device_login() {
   acquire_credentials
@@ -518,33 +630,14 @@ run_oauth_device_login() {
   echo "myCodex: a verification URL and code will appear below — open the URL," >&2
   echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
 
+  local model="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL:-gpt-5.3-codex}}"
+  local ready_timeout login_timeout
+  ready_timeout="$(read_positive_timeout MYCODEX_CHATGPT_READY_TIMEOUT 60)"
+  login_timeout="$(read_positive_timeout MYCODEX_CHATGPT_LOGIN_TIMEOUT 900)"
+
   launcher up -d || die "failed to start the stack for login"
 
-  echo "myCodex: waiting for the LiteLLM sidecar to accept requests..." >&2
-  wait_for_litellm_ready || die "LiteLLM did not become ready; inspect '${SCRIPT_DIR}/myCodex logs litellm' and retry"
-
-  launcher logs -f litellm &
-  local log_pid=$!
-
-  local model="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL:-gpt-5.3-codex}}"
-  # The provider allows ~15 minutes for the browser step; match that budget.
-  local deadline=$((SECONDS + 900))
-  trigger_chatgpt_device_flow "${model}"
-
-  while ! chatgpt_auth_complete "${token_file}"; do
-    # If the triggering request returned without minting a token, fire it again.
-    if ! kill -0 "${CHATGPT_PROBE_PID}" 2>/dev/null; then
-      trigger_chatgpt_device_flow "${model}"
-    fi
-    if (( SECONDS >= deadline )); then
-      kill "${log_pid}" "${CHATGPT_PROBE_PID}" 2>/dev/null || true
-      die "timed out after 15 minutes waiting for ChatGPT login; rerun '${SCRIPT_DIR}/myCodex login'"
-    fi
-    sleep 3
-  done
-
-  kill "${log_pid}" "${CHATGPT_PROBE_PID}" 2>/dev/null || true
-  echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
+  run_chatgpt_device_flow "${token_file}" "${model}" "${ready_timeout}" "${login_timeout}"
 }
 
 resolve_auth_profile

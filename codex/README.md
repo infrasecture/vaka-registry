@@ -136,6 +136,16 @@ refreshes it automatically thereafter. If you already have a Codex
 `~/.codex/auth.json`, import it instead with
 `MYCODEX_CHATGPT_AUTH=~/.codex/auth.json MYCODEX_AUTH=chatgpt ./myCodex login`.
 
+Login first gives LiteLLM up to 60 seconds to become healthy. It then makes one
+device-flow request and allows up to 15 minutes for browser login and MFA. New
+LiteLLM output is followed so the current URL and code remain visible, and a
+status line is printed every 30 seconds while authorization is pending. Press
+Ctrl-C to cancel. Configuration, network, or provider failures terminate that
+single request and are reported immediately; the wrapper never creates new
+device codes in a retry loop. If local startup or provider policy requires a
+different limit, set `MYCODEX_CHATGPT_READY_TIMEOUT` or
+`MYCODEX_CHATGPT_LOGIN_TIMEOUT` to a positive number of seconds.
+
 > The `chatgpt` and `vertex` profiles are new and depend on provider-side
 > behavior (LiteLLM's `chatgpt/` provider and a chatgpt-capable image; a real
 > Vertex project). Verify them in your environment before relying on them; the
