@@ -44,7 +44,7 @@ def codex_label(compose, key):
 compose = render()
 
 codex_image = compose.get("services", {}).get("codex", {}).get("image")
-expected_codex_image = "ghcr.io/infrasecture/harness-workstation:0.146.0"
+expected_codex_image = "ghcr.io/infrasecture/harness-workstation:0.147.0-r2"
 if codex_image != expected_codex_image:
     raise SystemExit(
         f"FAIL: codex image is {codex_image!r}, want SemVer reference "
