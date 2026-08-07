@@ -36,6 +36,11 @@ run_prestart
 grep -Fxq 'model = "user-choice"' "${CONFIG}" || fail "default profile deleted the user's model line"
 grep -Fxq 'model_provider = "litellm"' "${CONFIG}" || fail "default profile did not set the litellm provider"
 grep -Fq '[model_providers.litellm]' "${CONFIG}" || fail "default profile did not add the provider table"
+grep -Fxq 'env_key = "MYCODEX_GATEWAY_TOKEN"' "${CONFIG}" \
+  || fail "provider does not use the restricted gateway token"
+if grep -Fq 'env_key = "OPENAI_API_KEY"' "${CONFIG}"; then
+  fail "provider retained the legacy administrator-key alias"
+fi
 grep -Fxq 'trust_level = "trusted"' "${CONFIG}" || fail "default profile dropped the projects table"
 
 # Idempotent: a second run keeps the user's model and does not duplicate blocks.
