@@ -109,7 +109,12 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     launcher.chmod(0o755)
 
     docker = fake_bin / "docker"
-    docker.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "[[ \"${1:-}\" == ps ]] && exit 0\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
     docker.chmod(0o755)
 
     env = clean_env(fake_bin, capture)

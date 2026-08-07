@@ -730,13 +730,17 @@ gateway_sidecar_container_ids() {
 }
 
 guard_gateway_auth_migration() {
-  command -v docker >/dev/null 2>&1 || return 0
+  command -v docker >/dev/null 2>&1 \
+    || die "docker is required to verify the gateway credential migration"
 
-  local container contract
+  local container contract sidecar_ids
   local containers=("${CODEX_CONTAINER_NAME}")
+  if ! sidecar_ids="$(gateway_sidecar_container_ids)"; then
+    die "cannot inspect Docker containers for the gateway credential migration; check the selected Docker daemon and retry"
+  fi
   while IFS= read -r container; do
     [[ -n "${container}" ]] && containers+=("${container}")
-  done < <(gateway_sidecar_container_ids || true)
+  done <<< "${sidecar_ids}"
 
   for container in "${containers[@]}"; do
     contract="$(docker inspect --format \

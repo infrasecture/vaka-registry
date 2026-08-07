@@ -69,6 +69,10 @@ cat > "${FAKE_BIN}/docker" <<'STUB'
 set -euo pipefail
 
 case "${1:-}" in
+  ps)
+    # No legacy LiteLLM sidecar exists for this test project.
+    exit 0
+    ;;
   inspect)
     container="${*: -1}"
     if [[ "${container}" == "${MYCODEX_TEST_CONTAINER_ID:?}" ]]; then

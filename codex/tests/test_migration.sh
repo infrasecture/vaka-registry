@@ -31,6 +31,9 @@ cat > "${FAKE_BIN}/docker" <<'STUB'
 set -euo pipefail
 if [[ "${1:-}" == "ps" ]]; then
   case "${MYCODEX_TEST_CONTAINER_STATE:-absent}" in
+    daemon-error)
+      exit 42
+      ;;
     sidecar-legacy|sidecar-current)
       printf '%s\n' test-litellm-container
       ;;
@@ -101,6 +104,15 @@ grep -Fq "test-litellm-container" "${sidecar_error}" \
   || fail "partial-stack failure did not identify the legacy LiteLLM sidecar"
 [[ ! -e "${CAPTURE}" ]] || fail "legacy sidecar reached the login launcher"
 echo "ok: a legacy LiteLLM-only partial stack is blocked before device login"
+
+daemon_error="${TMP}/daemon.err"
+if run_wrapper daemon-error up > /dev/null 2> "${daemon_error}"; then
+  fail "container-inventory failure was treated as an empty project"
+fi
+grep -Fq 'cannot inspect Docker containers' "${daemon_error}" \
+  || fail "container-inventory failure was not actionable"
+[[ ! -e "${CAPTURE}" ]] || fail "failed migration inventory reached the launcher"
+echo "ok: Docker inventory errors fail closed before credential migration"
 
 run_wrapper legacy down >/dev/null
 grep -Eq '(^| )down($| )' "${CAPTURE}" || fail "migration down command did not reach the launcher"
