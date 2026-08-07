@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
 #
-# It adds only what upstream does not provide: it collects the provider API key,
-# maintains an internal LiteLLM proxy key, and routes every Compose call through
-# vaka for egress enforcement (MYCODEX_COMPOSE). Everything else — host identity,
-# path-parity workdir, per-project state (--private-env), attach/exec, readiness
-# — is handled by the vendored launcher unchanged.
+# It adds only what upstream does not provide: it selects and acquires provider
+# credentials, maintains an internal LiteLLM proxy key, and routes every Compose
+# call through vaka for egress enforcement (MYCODEX_COMPOSE). Everything else —
+# host identity, path-parity workdir, per-project state (--private-env),
+# attach/exec, and readiness — is handled by the vendored launcher unchanged.
 
 recipe_bash_is_supported() {
   (( BASH_VERSINFO[0] > 4 ||
@@ -257,17 +257,1063 @@ resolve_secret_env() {
   export "${env_name}=${env_value}"
 }
 
-# Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
-# render Compose config without them (Compose prints a benign unset-var warning).
-case "${1:-}" in
-  ""|up|start|restart)
-    resolve_secret_env OPENAI_API_KEY openai_api_key prompt
-    resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
+die() {
+  echo "myCodex: $*" >&2
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Auth profiles
+#
+# The persisted selection chooses how LiteLLM authenticates upstream;
+# --auth/MYCODEX_AUTH can override it for one invocation. The agent container is
+# auth-agnostic: it always speaks to the sidecar with the internal proxy key, so
+# only the sidecar's provider config, credential, and egress change.
+#
+# The built-in profile "openai" is realized by the recipe's root files
+# (docker-compose.yaml, vaka.yaml, litellm.config.yaml) and needs no overlay, so
+# it stays exactly the artifact validated by registry CI. Every other profile is
+# data under auth-profiles/<id>/: profile.env (manifest), overlay.yaml (compose
+# overlay), litellm.config.yaml, and vaka.yaml (a complete egress policy).
+# ---------------------------------------------------------------------------
+
+# The selected profile is non-secret recipe state. Keeping it beside the managed
+# credentials gives it the same update-preserved lifecycle without introducing a
+# second state directory.
+AUTH_PROFILE_FILE="${SCRIPT_DIR}/.secrets/auth_profile"
+AUTH_SELECTION_SOURCE=""
+
+# The launcher derives the codex container name deterministically from the
+# caller directory; replicate it so we can inspect a running stack's profile.
+# Keep this in sync with bin/myCodex's PROJECT_NAME/CONTAINER_NAME derivation.
+CODEX_PROJECT_NAME="$(basename -- "${CALLER_DIR}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+[[ -n "${CODEX_PROJECT_NAME}" ]] || CODEX_PROJECT_NAME="workspace"
+CODEX_CONTAINER_NAME="${CODEX_PROJECT_NAME}-codex"
+
+# Profile fields; defaults describe the built-in "openai" profile.
+PROFILE_VAKA_FILE="${SCRIPT_DIR}/vaka.yaml"
+PROFILE_OVERLAY=""
+PROFILE_LITELLM_CONFIG=""
+CREDENTIAL_KIND="env-secret"
+PROFILE_SECRET_ENV="OPENAI_API_KEY"
+PROFILE_SECRET_MANAGED="openai_api_key"
+PROFILE_CREDENTIAL_ENV=""
+PROFILE_DEFAULT_MODEL=""
+PROFILE_LOGIN_MODEL=""
+PROFILE_LEGACY_DEFAULT_MODEL=""
+PROFILE_DISPLAY_NAME="OpenAI API key"
+
+validate_profile_id() {
+  case "$1" in
+    ''|.|..|*[!a-z0-9._-]*)
+      die "invalid MYCODEX_AUTH profile id: '$1'"
+      ;;
+  esac
+}
+
+read_persisted_auth_profile() {
+  local value _extra
+
+  [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]] || return 1
+  [[ ! -L "${AUTH_PROFILE_FILE}" && -f "${AUTH_PROFILE_FILE}" ]] \
+    || die "${AUTH_PROFILE_FILE} must be a managed regular file, not a symlink or other file"
+
+  {
+    IFS= read -r value || [[ -n "${value}" ]] \
+      || die "${AUTH_PROFILE_FILE} is empty"
+    if IFS= read -r _extra; then
+      die "${AUTH_PROFILE_FILE} must contain exactly one profile id"
+    fi
+  } < "${AUTH_PROFILE_FILE}"
+
+  validate_profile_id "${value}"
+  printf '%s' "${value}"
+}
+
+persist_auth_profile() {
+  local profile="$1"
+  local temp_file
+
+  validate_profile_id "${profile}"
+  ensure_managed_secrets_dir "MYCODEX_AUTH" "${SCRIPT_DIR}/.secrets" || exit $?
+  if [[ -L "${AUTH_PROFILE_FILE}" || ( -e "${AUTH_PROFILE_FILE}" && ! -f "${AUTH_PROFILE_FILE}" ) ]]; then
+    die "${AUTH_PROFILE_FILE} must be a managed regular file, not a symlink or other file"
+  fi
+
+  temp_file="$(mktemp "${SCRIPT_DIR}/.secrets/.auth_profile.XXXXXX")" \
+    || die "failed to create a temporary auth-profile file"
+  chmod 600 "${temp_file}"
+  if ! printf '%s\n' "${profile}" > "${temp_file}"; then
+    rm -f -- "${temp_file}"
+    die "failed to write the selected auth profile"
+  fi
+  if ! command mv -f "${temp_file}" "${AUTH_PROFILE_FILE}"; then
+    rm -f -- "${temp_file}"
+    die "failed to persist the selected auth profile"
+  fi
+}
+
+clear_persisted_auth_profile() {
+  local selected
+
+  [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]] || return 0
+  selected="$(read_persisted_auth_profile)"
+  [[ "${selected}" == "$1" ]] || return 0
+  rm -f -- "${AUTH_PROFILE_FILE}" || die "failed to clear ${AUTH_PROFILE_FILE}"
+}
+
+available_auth_profiles() {
+  local dir profile
+
+  # Put the browser-based subscription flow first during onboarding, keep the
+  # built-in API-key profile second, then append future recipe profiles.
+  if [[ -f "${SCRIPT_DIR}/auth-profiles/chatgpt/profile.env" ]]; then
+    printf '%s\n' chatgpt
+  fi
+  printf '%s\n' openai
+  shopt -s nullglob
+  for dir in "${SCRIPT_DIR}"/auth-profiles/*; do
+    [[ -f "${dir}/profile.env" ]] || continue
+    profile="$(basename -- "${dir}")"
+    [[ "${profile}" == "chatgpt" || "${profile}" == "openai" ]] && continue
+    printf '%s\n' "${profile}"
+  done
+  shopt -u nullglob
+}
+
+has_controlling_tty() {
+  { : < /dev/tty > /dev/tty; } 2>/dev/null
+}
+
+auth_profile_display_name() (
+  local profile="$1"
+  local manifest
+
+  if [[ "${profile}" == "openai" ]]; then
+    printf '%s' "OpenAI API key"
+    return
+  fi
+
+  manifest="${SCRIPT_DIR}/auth-profiles/${profile}/profile.env"
+  PROFILE_DISPLAY_NAME="${profile}"
+  # profile.env is trusted recipe content, just as it is during normal profile
+  # resolution. Run it in a subshell so listing cannot alter active state.
+  # shellcheck disable=SC1090
+  source "${manifest}"
+  printf '%s' "${PROFILE_DISPLAY_NAME:-${profile}}"
+)
+
+print_auth_profiles() {
+  local profile
+  while IFS= read -r profile; do
+    printf '  %-12s %s\n' "${profile}" "$(auth_profile_display_name "${profile}")"
+  done < <(available_auth_profiles)
+}
+
+select_auth_profile_interactively() {
+  local profiles=()
+  local choice profile index
+
+  if ! has_controlling_tty; then
+    echo "myCodex: no authentication profile is selected; specify one explicitly:" >&2
+    echo "  myCodex login <profile>" >&2
+    echo "myCodex: available profiles:" >&2
+    print_auth_profiles >&2
+    return 2
+  fi
+
+  mapfile -t profiles < <(available_auth_profiles)
+  printf 'Choose how myCodex should authenticate:\n' > /dev/tty
+  for index in "${!profiles[@]}"; do
+    profile="${profiles[index]}"
+    printf '  %d) %-12s %s\n' "$((index + 1))" "${profile}" \
+      "$(auth_profile_display_name "${profile}")" > /dev/tty
+  done
+  printf 'Profile [1]: ' > /dev/tty
+  IFS= read -r choice < /dev/tty || return 130
+  [[ -n "${choice}" ]] || choice=1
+
+  if [[ "${choice}" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#profiles[@]} )); then
+    printf '%s' "${profiles[choice - 1]}"
+    return
+  fi
+  for profile in "${profiles[@]}"; do
+    if [[ "${choice}" == "${profile}" ]]; then
+      printf '%s' "${profile}"
+      return
+    fi
+  done
+  echo "myCodex: unknown authentication profile '${choice}'" >&2
+  return 2
+}
+
+resolve_auth_profile() {
+  [[ "${MYCODEX_AUTH}" == "openai" ]] && return
+
+  validate_profile_id "${MYCODEX_AUTH}"
+  local dir="${SCRIPT_DIR}/auth-profiles/${MYCODEX_AUTH}"
+  local manifest="${dir}/profile.env"
+  [[ -f "${manifest}" ]] || die "unknown auth profile '${MYCODEX_AUTH}' (expected ${manifest})"
+
+  # profile.env is trusted recipe content (like bin/lib/mycodex-image.sh). Reset
+  # the fields it may set, then source it.
+  CREDENTIAL_KIND=""
+  PROFILE_SECRET_ENV=""
+  PROFILE_SECRET_MANAGED=""
+  PROFILE_CREDENTIAL_ENV=""
+  PROFILE_DEFAULT_MODEL=""
+  PROFILE_LOGIN_MODEL=""
+  PROFILE_LEGACY_DEFAULT_MODEL=""
+  PROFILE_DISPLAY_NAME="${MYCODEX_AUTH}"
+  # shellcheck disable=SC1090
+  source "${manifest}"
+
+  PROFILE_VAKA_FILE="${dir}/vaka.yaml"
+  PROFILE_OVERLAY="${dir}/overlay.yaml"
+  [[ -f "${PROFILE_VAKA_FILE}" ]] || die "auth profile '${MYCODEX_AUTH}' is missing vaka.yaml"
+  [[ -f "${PROFILE_OVERLAY}" ]] || die "auth profile '${MYCODEX_AUTH}' is missing overlay.yaml"
+  [[ -n "${CREDENTIAL_KIND}" ]] || die "auth profile '${MYCODEX_AUTH}' does not set CREDENTIAL_KIND"
+  if [[ -f "${dir}/litellm.config.yaml" ]]; then
+    # Compose resolves relative bind sources against the project directory (the
+    # base compose file's dir, i.e. the recipe root), so keep this repo-relative.
+    PROFILE_LITELLM_CONFIG="./auth-profiles/${MYCODEX_AUTH}/litellm.config.yaml"
+  fi
+}
+
+# The oauth-device-native token dir is bind-mounted rw into the sidecar; create
+# it (0700) up front so Docker does not create it root-owned on first `up`.
+ensure_chatgpt_token_dir() {
+  ensure_managed_secrets_dir "MYCODEX_AUTH" "${SCRIPT_DIR}/.secrets" || exit $?
+  local dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
+  local auth_file="${dir}/auth.json"
+
+  [[ ! -L "${dir}" ]] || die "${dir} is a symlink; managed token storage must be a real directory"
+  if [[ -e "${dir}" ]]; then
+    [[ -d "${dir}" ]] || die "${dir} exists but is not a directory"
+  else
+    (umask 077 && mkdir -p -- "${dir}") || die "failed to create ${dir}"
+  fi
+  [[ ! -L "${auth_file}" ]] || die "${auth_file} is a symlink; managed token state must be a regular file"
+  if [[ -e "${auth_file}" && ! -f "${auth_file}" ]]; then
+    die "${auth_file} exists but is not a regular file"
+  fi
+}
+
+# credential-file kind: PROFILE_CREDENTIAL_ENV names a host env var whose value
+# is a path to a credential file (e.g. a GCP service-account JSON). The wrapper
+# never reads or copies the file; it exports MYCODEX_CREDENTIAL_FILE (an absolute
+# path) for the profile overlay to bind read-only into the sidecar.
+resolve_credential_file() {
+  local var="${PROFILE_CREDENTIAL_ENV}"
+  [[ -n "${var}" ]] || die "profile '${MYCODEX_AUTH}': credential-file kind requires PROFILE_CREDENTIAL_ENV"
+  local path="${!var-}"
+  [[ -n "${path}" ]] || die "set ${var} to the path of the ${MYCODEX_AUTH} credential file"
+  [[ -f "${path}" ]] || die "${var}: ${path} must be a readable regular file"
+  local abs
+  abs="$(cd -- "$(dirname -- "${path}")" >/dev/null 2>&1 && printf '%s/%s' "$(pwd -P)" "$(basename -- "${path}")")" \
+    || die "cannot resolve ${var}=${path}"
+  export MYCODEX_CREDENTIAL_FILE="${abs}"
+}
+
+# Acquire everything the selected profile needs to (re)create the stack. The
+# agent<->gateway proxy key is minted and persisted for every profile.
+acquire_credentials() {
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      [[ -n "${PROFILE_SECRET_ENV}" && -n "${PROFILE_SECRET_MANAGED}" ]] \
+        || die "profile '${MYCODEX_AUTH}': env-secret kind requires PROFILE_SECRET_ENV and PROFILE_SECRET_MANAGED"
+      resolve_secret_env "${PROFILE_SECRET_ENV}" "${PROFILE_SECRET_MANAGED}" prompt
+      ;;
+    oauth-device-native)
+      ensure_chatgpt_token_dir
+      ;;
+    credential-file)
+      resolve_credential_file
+      ;;
+    *)
+      die "profile '${MYCODEX_AUTH}': unknown CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+  resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
+}
+
+# `docker compose start`/`restart` (and attaching to an already-running stack) do
+# not recreate containers, so they cannot apply a different profile's config or
+# egress policy. Refuse rather than run one profile's containers under another's
+# name. A stack created before this label existed, or a missing docker CLI,
+# degrades to no-op (nothing to compare against).
+guard_profile_switch() {
+  local operation="${1:-start/restart}"
+  command -v docker >/dev/null 2>&1 || return 0
+  local running
+  running="$(docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
+    "${CODEX_CONTAINER_NAME}" 2>/dev/null)" || return 0
+  [[ -n "${running}" && "${running}" != "${MYCODEX_AUTH}" ]] || return 0
+  die "this project is running under auth profile '${running}', not '${MYCODEX_AUTH}'.
+myCodex: ${operation} will not replace containers created for another profile.
+myCodex: run '${SCRIPT_DIR}/myCodex down' first, then retry with '${MYCODEX_AUTH}'."
+}
+
+# Import a pre-existing ChatGPT auth.json into the sidecar token dir, normalizing
+# Codex's nested `tokens` layout to the top-level fields LiteLLM's chatgpt/
+# provider expects (mirrors isec's NormalizeChatGPTAuth).
+import_chatgpt_auth() {
+  local src="$1" dst="$2"
+  [[ -f "${src}" ]] || die "MYCODEX_CHATGPT_AUTH: ${src} is not a readable file"
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 is required to import MYCODEX_CHATGPT_AUTH; otherwise use the interactive login"
+  ensure_chatgpt_token_dir
+  python3 - "${src}" "${dst}" <<'PY'
+import json, os, sys, tempfile
+src, dst = sys.argv[1], sys.argv[2]
+raw = json.load(open(src))
+if isinstance(raw.get("access_token"), str):
+    out = raw
+else:
+    tokens = raw.get("tokens") or {}
+    out = {k: tokens[k] for k in ("access_token", "refresh_token", "id_token", "account_id")
+           if isinstance(tokens.get(k), str) and tokens[k]}
+    for k in ("auth_mode", "last_refresh"):
+        if k in raw:
+            out[k] = raw[k]
+if not isinstance(out.get("access_token"), str) or not out["access_token"]:
+    sys.exit("MYCODEX_CHATGPT_AUTH: no access_token found to import")
+fd, tmp = tempfile.mkstemp(prefix=".auth.json.", dir=os.path.dirname(dst))
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(out, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dst)
+except BaseException:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+}
+
+launcher() {
+  "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"
+}
+
+follow_litellm_logs() {
+  local since="$1"
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" \
+    "${private_env[@]}" "${profile_files[@]}" logs --since "${since}" --follow litellm
+}
+
+# `myCodex login` primes the selected profile's credential. For env-secret /
+# credential-file this just resolves and stores the input; for oauth-device-native
+# it surfaces LiteLLM's own device flow (which mints and later refreshes the
+# token) or imports an existing auth.json via MYCODEX_CHATGPT_AUTH.
+run_login() {
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      acquire_credentials
+      echo "myCodex: credentials for profile '${MYCODEX_AUTH}' are configured; nothing else to do." >&2
+      ;;
+    credential-file)
+      acquire_credentials
+      echo "myCodex: profile '${MYCODEX_AUTH}' uses credential file ${MYCODEX_CREDENTIAL_FILE}." >&2
+      ;;
+    oauth-device-native)
+      run_oauth_device_login
+      ;;
+    *)
+      die "login is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+}
+
+selected_credential_status() {
+  local env_name file_env_name managed_file token_file
+
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      env_name="${PROFILE_SECRET_ENV}"
+      file_env_name="${env_name}_FILE"
+      managed_file="${SCRIPT_DIR}/.secrets/${PROFILE_SECRET_MANAGED}"
+      if [[ -n "${!env_name-}" ]]; then
+        printf 'provided by %s' "${env_name}"
+      elif [[ -n "${!file_env_name-}" ]]; then
+        printf 'provided by %s' "${file_env_name}"
+      elif [[ -s "${managed_file}" && ! -L "${managed_file}" ]]; then
+        printf 'stored by myCodex'
+      elif [[ -e "${managed_file}" || -L "${managed_file}" ]]; then
+        printf 'invalid managed credential at %s' "${managed_file}"
+      else
+        printf 'not configured'
+      fi
+      ;;
+    oauth-device-native)
+      token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
+      if chatgpt_auth_complete "${token_file}"; then
+        printf 'token stored by myCodex'
+      elif [[ -e "${token_file}" || -L "${token_file}" ]]; then
+        printf 'device login incomplete or invalid'
+      else
+        printf 'not logged in'
+      fi
+      ;;
+    credential-file)
+      env_name="${PROFILE_CREDENTIAL_ENV}"
+      if [[ -n "${!env_name-}" ]]; then
+        printf 'provided by %s' "${env_name}"
+      else
+        printf 'not configured'
+      fi
+      ;;
+    *)
+      printf 'unsupported credential kind %s' "${CREDENTIAL_KIND}"
+      ;;
+  esac
+}
+
+running_auth_profile() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
+    "${CODEX_CONTAINER_NAME}" 2>/dev/null
+}
+
+run_auth_status() {
+  local fallback running
+
+  printf 'Selected profile: %s (%s)\n' "${MYCODEX_AUTH}" "${AUTH_SELECTION_SOURCE}"
+  printf 'Authentication:  %s\n' "$(selected_credential_status)"
+  if [[ "${AUTH_SELECTION_SOURCE}" != "persisted" \
+      && ( -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ) ]]; then
+    fallback="$(read_persisted_auth_profile)"
+    printf 'Stored default:  %s\n' "${fallback}"
+  fi
+  if running="$(running_auth_profile)" && [[ -n "${running}" ]]; then
+    printf 'Running profile: %s\n' "${running}"
+  else
+    printf 'Running profile: none for this project\n'
+  fi
+}
+
+run_unselected_auth_status() {
+  local running
+
+  printf 'Selected profile: none\n'
+  printf 'Authentication:  choose a profile with myCodex login\n'
+  if running="$(running_auth_profile)" && [[ -n "${running}" ]]; then
+    printf 'Running profile: %s\n' "${running}"
+  else
+    printf 'Running profile: none for this project\n'
+  fi
+}
+
+has_openai_credential_source() {
+  local managed_file="${SCRIPT_DIR}/.secrets/openai_api_key"
+  [[ -n "${OPENAI_API_KEY-}" || -n "${OPENAI_API_KEY_FILE-}" \
+      || -e "${managed_file}" || -L "${managed_file}" ]]
+}
+
+run_auth_list() {
+  local profile marker
+
+  while IFS= read -r profile; do
+    marker=" "
+    [[ "${profile}" == "${MYCODEX_AUTH}" ]] && marker="*"
+    printf '%s %-12s %s\n' "${marker}" "${profile}" \
+      "$(auth_profile_display_name "${profile}")"
+  done < <(available_auth_profiles)
+}
+
+run_logout() {
+  local file_env_name managed_file token_dir token_file running removed=0
+
+  case "${CREDENTIAL_KIND}" in
+    env-secret)
+      managed_file="${SCRIPT_DIR}/.secrets/${PROFILE_SECRET_MANAGED}"
+      if [[ -L "${managed_file}" ]]; then
+        die "${managed_file} is a symlink; refusing to treat it as managed credential state"
+      fi
+      if [[ -e "${managed_file}" ]]; then
+        [[ -f "${managed_file}" ]] || die "${managed_file} is not a regular file"
+        rm -f -- "${managed_file}" || die "failed to remove ${managed_file}"
+        removed=1
+      fi
+      file_env_name="${PROFILE_SECRET_ENV}_FILE"
+      if [[ -n "${!PROFILE_SECRET_ENV-}" || -n "${!file_env_name-}" ]]; then
+        echo "myCodex: ${PROFILE_SECRET_ENV} is still supplied externally and was not changed." >&2
+      fi
+      ;;
+    oauth-device-native)
+      token_dir="${SCRIPT_DIR}/.secrets/chatgpt-token"
+      token_file="${token_dir}/auth.json"
+      [[ ! -L "${token_dir}" ]] || die "${token_dir} is a symlink; refusing to modify it"
+      [[ ! -L "${token_file}" ]] || die "${token_file} is a symlink; refusing to modify it"
+      if [[ -e "${token_file}" ]]; then
+        [[ -f "${token_file}" ]] || die "${token_file} is not a regular file"
+        rm -f -- "${token_file}" || die "failed to remove ${token_file}"
+        removed=1
+      fi
+      ;;
+    credential-file)
+      echo "myCodex: profile '${MYCODEX_AUTH}' uses an external credential file; it was not modified." >&2
+      ;;
+    *)
+      die "logout is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
+      ;;
+  esac
+
+  clear_persisted_auth_profile "${MYCODEX_AUTH}"
+  if (( removed )); then
+    echo "myCodex: removed the managed credential for profile '${MYCODEX_AUTH}'." >&2
+  else
+    echo "myCodex: no managed credential was stored for profile '${MYCODEX_AUTH}'." >&2
+  fi
+  if running="$(running_auth_profile)" && [[ "${running}" == "${MYCODEX_AUTH}" ]]; then
+    echo "myCodex: running containers were not changed; bring this project down to end its current session." >&2
+  fi
+}
+
+print_wrapper_auth_help() {
+  cat <<'EOF'
+
+Authentication commands added by the recipe wrapper:
+  myCodex login [profile]           Authenticate and select a persistent profile
+  myCodex logout [profile]          Remove myCodex-managed credentials
+  myCodex auth status               Show selected, stored, and running profiles
+  myCodex auth list                 List available profiles
+  myCodex --auth <profile> ...      Override the profile for one invocation
+
+MYCODEX_AUTH remains a one-invocation override for automation. A profile passed
+to `login` is stored only after authentication succeeds.
+EOF
+}
+
+# Login is complete only when auth.json actually carries a non-empty access_token.
+# LiteLLM writes intermediate device-flow state (e.g. device_code_requested_at)
+# to that file before the browser step finishes, so a merely non-empty file does
+# not mean success.
+chatgpt_auth_complete() {
+  local file="$1"
+  [[ -s "${file}" && ! -L "${file}" && -f "${file}" ]] || return 1
+  grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"[^"]+"' "${file}"
+}
+
+# A canceled device flow leaves LiteLLM's request timestamp in auth.json. Its
+# next request may otherwise wait on that abandoned flow before printing a new
+# code. An explicit login starts a fresh flow, so discard only incomplete state.
+discard_incomplete_chatgpt_auth() {
+  local file="$1"
+
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  [[ ! -L "${file}" && -f "${file}" ]] \
+    || die "${file} must be managed regular-file state, not a symlink or other file"
+  chatgpt_auth_complete "${file}" && return 0
+  rm -f -- "${file}" || die "failed to discard incomplete ChatGPT login state at ${file}"
+  echo "myCodex: discarded incomplete ChatGPT login state; requesting a new code." >&2
+}
+
+# Resolve the Compose-managed sidecar without depending on its generated name.
+# The command's exit status distinguishes an absent service from a failed query;
+# callers must not treat a failed query as permission to remove state.
+LITELLM_CONTAINER_ID=""
+resolve_litellm_container_id() {
+  local output
+  local ids=()
+
+  LITELLM_CONTAINER_ID=""
+  output="$(launcher ps --all --quiet litellm)" || return 2
+  [[ -n "${output}" ]] || return 1
+  mapfile -t ids <<< "${output}"
+  [[ ${#ids[@]} -eq 1 && "${ids[0]}" =~ ^[0-9a-fA-F]{12,64}$ ]] \
+    || return 2
+  LITELLM_CONTAINER_ID="${ids[0]}"
+}
+
+LOGIN_LITELLM_PRIOR_STATE="absent"
+snapshot_litellm_state() {
+  local resolve_status=0 state
+
+  resolve_litellm_container_id || resolve_status=$?
+  case "${resolve_status}" in
+    0)
+      state="$(docker inspect --format '{{.State.Status}}' "${LITELLM_CONTAINER_ID}" 2>/dev/null)" \
+        || die "could not inspect the existing LiteLLM container"
+      LOGIN_LITELLM_PRIOR_STATE="${state:-unknown}"
+      ;;
+    1)
+      LOGIN_LITELLM_PRIOR_STATE="absent"
+      ;;
+    *)
+      die "could not determine whether the LiteLLM service already exists"
+      ;;
+  esac
+}
+
+restore_litellm_state() {
+  local resolve_status=0
+
+  case "${LOGIN_LITELLM_PRIOR_STATE}" in
+    running)
+      return 0
+      ;;
+    absent)
+      echo "myCodex: removing the temporary LiteLLM login service." >&2
+      launcher rm --stop --force litellm \
+        || echo "myCodex: warning: failed to remove the temporary LiteLLM service." >&2
+      ;;
+    paused)
+      resolve_litellm_container_id || resolve_status=$?
+      if (( resolve_status == 0 )); then
+        docker pause "${LITELLM_CONTAINER_ID}" >/dev/null 2>&1 \
+          || echo "myCodex: warning: failed to restore the paused LiteLLM state." >&2
+      fi
+      ;;
+    created|exited|dead)
+      echo "myCodex: restoring the LiteLLM service to a stopped state." >&2
+      launcher stop litellm \
+        || echo "myCodex: warning: failed to stop the LiteLLM login service." >&2
+      ;;
+    *)
+      echo "myCodex: warning: prior LiteLLM state was '${LOGIN_LITELLM_PRIOR_STATE}'; leaving the service unchanged." >&2
+      ;;
+  esac
+}
+
+probe_litellm_ready() {
+  local container_id="$1"
+  local request_timeout="$2"
+
+  docker exec "${container_id}" python -c '
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen(
+        "http://127.0.0.1:4000/health/liveliness",
+        timeout=float(sys.argv[1]),
+    ) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"HTTP {response.status}")
+except Exception as exc:
+    print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "${request_timeout}"
+}
+
+# Poll the server from inside the sidecar. Login verifies the component that owns
+# OAuth; normal stack startup remains responsible for the agent-to-proxy path.
+LITELLM_READY_ERROR=""
+wait_for_litellm_ready() {
+  local container_id="$1"
+  local timeout="$2"
+  local log_pid="$3"
+  local started="${SECONDS}"
+  local deadline=$((SECONDS + timeout))
+  local remaining request_timeout sleep_for output elapsed
+  local last_reported=""
+  local next_progress="${SECONDS}"
+
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "${log_pid}" 2>/dev/null; then
+      if wait "${log_pid}"; then
+        LITELLM_READY_ERROR="LiteLLM log stream ended unexpectedly"
+      else
+        LITELLM_READY_ERROR="LiteLLM log stream failed (exit $?)"
+      fi
+      return 1
+    fi
+
+    remaining=$((deadline - SECONDS))
+    request_timeout=3
+    (( remaining < request_timeout )) && request_timeout="${remaining}"
+
+    if output="$(probe_litellm_ready "${container_id}" "${request_timeout}" 2>&1)"; then
+      elapsed=$((SECONDS - started))
+      echo "myCodex: LiteLLM ready after ${elapsed}s." >&2
+      return 0
+    fi
+    output="${output//$'\n'/; }"
+    [[ ${#output} -le 400 ]] || output="${output:0:397}..."
+    LITELLM_READY_ERROR="${output:-readiness probe failed without diagnostic output}"
+
+    if [[ "${LITELLM_READY_ERROR}" != "${last_reported}" \
+        || "${SECONDS}" -ge "${next_progress}" ]]; then
+      elapsed=$((SECONDS - started))
+      echo "myCodex: LiteLLM not ready after ${elapsed}s: ${LITELLM_READY_ERROR}" >&2
+      last_reported="${LITELLM_READY_ERROR}"
+      next_progress=$((SECONDS + 10))
+    fi
+
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || break
+    sleep_for=2
+    (( remaining < sleep_for )) && sleep_for="${remaining}"
+    sleep "${sleep_for}"
+  done
+  return 1
+}
+
+read_positive_timeout() {
+  local name="$1"
+  local fallback="$2"
+  local value="${!name:-${fallback}}"
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] \
+    || die "${name} must be a positive whole number of seconds (got '${value}')"
+  printf '%s' "${value}"
+}
+
+# Send exactly one request to trigger LiteLLM's provider-owned device flow. It
+# remains pending while the user completes browser login and MFA. The caller
+# watches both auth.json and this process: an early request failure is a real
+# error, not a reason to silently create another device code.
+CHATGPT_PROBE_PID=0
+trigger_chatgpt_device_flow() {
+  local container_id="$1"
+  local model="$2"
+  local timeout="$3"
+
+  case "${model}" in
+    ''|*[!A-Za-z0-9._:/@+-]*)
+      die "ChatGPT login model contains unsupported characters: '${model}'"
+      ;;
+  esac
+  # Build and authorize the request inside the sidecar so the embedded gateway
+  # key never appears in host process argv. The server itself owns OAuth and
+  # writes the resulting token through its managed bind mount.
+  docker exec "${container_id}" python -c '
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+key = os.environ.get("LITELLM_MASTER_KEY")
+if not key:
+    print("LITELLM_MASTER_KEY is missing inside the sidecar", file=sys.stderr)
+    raise SystemExit(2)
+
+request = urllib.request.Request(
+    "http://127.0.0.1:4000/v1/responses",
+    data=json.dumps({"model": sys.argv[1], "input": "login probe"}).encode(),
+    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=float(sys.argv[2])) as response:
+        response.read()
+except urllib.error.HTTPError as exc:
+    detail = exc.read(2048).decode("utf-8", "replace")
+    print(f"LiteLLM returned HTTP {exc.code}: {detail}", file=sys.stderr)
+    raise SystemExit(22)
+except Exception as exc:
+    print(f"LiteLLM request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "${model}" "${timeout}" &
+  CHATGPT_PROBE_PID=$!
+}
+
+stop_login_child() {
+  local pid="$1"
+  (( pid > 0 )) || return 0
+  kill "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+}
+
+run_chatgpt_device_flow() (
+  local token_file="$1"
+  local model="$2"
+  local ready_timeout="$3"
+  local login_timeout="$4"
+  local container_id="$5"
+  local log_since="$6"
+  local log_pid=0
+  local probe_pid=0
+
+  trap 'stop_login_child "${log_pid}"; stop_login_child "${probe_pid}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+
+  # Backfill this attempt's startup output before readiness. Device login may be
+  # initiated during startup, and those URL/code lines must never be hidden.
+  follow_litellm_logs "${log_since}" &
+  log_pid=$!
+
+  echo "myCodex: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
+  wait_for_litellm_ready "${container_id}" "${ready_timeout}" "${log_pid}" \
+    || die "LiteLLM did not become ready within ${ready_timeout}s. Last probe: ${LITELLM_READY_ERROR}"
+
+  local deadline=$((SECONDS + login_timeout))
+  local next_status=$((SECONDS + 30))
+  local remaining probe_status sleep_for
+  local request_timeout=$((login_timeout + 5))
+
+  echo "myCodex: waiting up to ${login_timeout}s for browser authorization and MFA; press Ctrl-C to cancel." >&2
+  trigger_chatgpt_device_flow "${container_id}" "${model}" "${request_timeout}"
+  probe_pid="${CHATGPT_PROBE_PID}"
+
+  while ! chatgpt_auth_complete "${token_file}"; do
+    if (( SECONDS >= deadline )); then
+      die "ChatGPT device code expired after ${login_timeout}s; rerun '${SCRIPT_DIR}/myCodex login' to request a new code"
+    fi
+
+    if ! kill -0 "${probe_pid}" 2>/dev/null; then
+      if wait "${probe_pid}"; then
+        probe_status=0
+      else
+        probe_status=$?
+      fi
+      probe_pid=0
+      chatgpt_auth_complete "${token_file}" && break
+      die "ChatGPT device-login request ended before credentials were issued (exit ${probe_status}); review the LiteLLM output above and retry"
+    fi
+
+    if ! kill -0 "${log_pid}" 2>/dev/null; then
+      if wait "${log_pid}"; then
+        probe_status=0
+      else
+        probe_status=$?
+      fi
+      log_pid=0
+      die "LiteLLM log stream ended during device login (exit ${probe_status}); retry so the verification code remains observable"
+    fi
+
+    if (( SECONDS >= next_status )); then
+      remaining=$((deadline - SECONDS))
+      echo "myCodex: still waiting for browser authorization (${remaining}s remaining; Ctrl-C cancels)." >&2
+      next_status=$((SECONDS + 30))
+    fi
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || continue
+    sleep_for=2
+    (( remaining < sleep_for )) && sleep_for="${remaining}"
+    sleep "${sleep_for}"
+  done
+
+  echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
+)
+
+run_oauth_device_login() (
+  acquire_credentials
+  local token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
+  local cleanup_service=0
+  local container_resolve_status=0
+  local log_since
+
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2317
+  cleanup_oauth_login() {
+    local status=$?
+    trap - EXIT
+    if (( cleanup_service )); then
+      restore_litellm_state
+    fi
+    exit "${status}"
+  }
+
+  if [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
+    import_chatgpt_auth "${MYCODEX_CHATGPT_AUTH}" "${token_file}"
+    echo "myCodex: imported ChatGPT auth into ${token_file}." >&2
+    return
+  fi
+
+  if chatgpt_auth_complete "${token_file}"; then
+    echo "myCodex: a ChatGPT token already exists at ${token_file}; nothing to do." >&2
+    return
+  fi
+
+  command -v docker >/dev/null 2>&1 || die "docker is required for 'myCodex login'"
+  guard_profile_switch "login"
+
+  echo "myCodex: starting the LiteLLM ChatGPT device login." >&2
+  echo "myCodex: a verification URL and code will appear below — open the URL," >&2
+  echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
+
+  local model="${MYCODEX_MODEL:-${PROFILE_LOGIN_MODEL:-${PROFILE_DEFAULT_MODEL:-}}}"
+  [[ -n "${model}" ]] \
+    || die "auth profile '${MYCODEX_AUTH}' does not define a model for device login"
+  local ready_timeout login_timeout
+  ready_timeout="$(read_positive_timeout MYCODEX_CHATGPT_READY_TIMEOUT 60)"
+  login_timeout="$(read_positive_timeout MYCODEX_CHATGPT_LOGIN_TIMEOUT 900)"
+
+  snapshot_litellm_state
+  cleanup_service=1
+  trap cleanup_oauth_login EXIT
+
+  discard_incomplete_chatgpt_auth "${token_file}"
+  log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
+  launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
+
+  resolve_litellm_container_id || container_resolve_status=$?
+  (( container_resolve_status == 0 )) \
+    || die "LiteLLM started but its Compose container could not be identified"
+
+  run_chatgpt_device_flow "${token_file}" "${model}" "${ready_timeout}" \
+    "${login_timeout}" "${LITELLM_CONTAINER_ID}" "${log_since}"
+)
+
+# Parse the wrapper's one root option before handing the remaining argv to the
+# vendored launcher. `login <profile>` is also an explicit CLI selection and has
+# the same precedence as --auth.
+wrapper_args=("$@")
+auth_option=""
+case "${wrapper_args[0]-}" in
+  --auth)
+    [[ ${#wrapper_args[@]} -ge 2 && -n "${wrapper_args[1]}" ]] \
+      || die "--auth requires a profile id"
+    auth_option="${wrapper_args[1]}"
+    wrapper_args=("${wrapper_args[@]:2}")
+    ;;
+  --auth=*)
+    auth_option="${wrapper_args[0]#--auth=}"
+    [[ -n "${auth_option}" ]] || die "--auth requires a profile id"
+    wrapper_args=("${wrapper_args[@]:1}")
+    ;;
+esac
+set -- "${wrapper_args[@]}"
+
+auth_command="${1:-}"
+auth_command_profile=""
+auth_command_profile_consumed=0
+case "${auth_command}" in
+  login|logout)
+    if [[ -n "${2:-}" && "${2}" != -* ]]; then
+      auth_command_profile="${2}"
+      auth_command_profile_consumed=1
+    fi
     ;;
 esac
 
-# Route every Compose invocation the launcher makes through vaka's egress policy.
-export MYCODEX_COMPOSE="vaka --vaka-file=${SCRIPT_DIR}/vaka.yaml compose"
+if [[ -n "${auth_option}" && -n "${auth_command_profile}" \
+    && "${auth_option}" != "${auth_command_profile}" ]]; then
+  die "conflicting auth profiles: --auth=${auth_option} and ${auth_command} ${auth_command_profile}"
+fi
+
+auth_profile_selected=0
+login_should_persist=0
+if [[ -n "${auth_command_profile}" ]]; then
+  MYCODEX_AUTH="${auth_command_profile}"
+  AUTH_SELECTION_SOURCE="command line"
+  auth_profile_selected=1
+  [[ "${auth_command}" == "login" ]] && login_should_persist=1
+elif [[ -n "${auth_option}" ]]; then
+  MYCODEX_AUTH="${auth_option}"
+  AUTH_SELECTION_SOURCE="--auth override"
+  auth_profile_selected=1
+elif [[ -n "${MYCODEX_AUTH-}" ]]; then
+  AUTH_SELECTION_SOURCE="MYCODEX_AUTH override"
+  auth_profile_selected=1
+elif [[ -e "${AUTH_PROFILE_FILE}" || -L "${AUTH_PROFILE_FILE}" ]]; then
+  MYCODEX_AUTH="$(read_persisted_auth_profile)"
+  AUTH_SELECTION_SOURCE="persisted"
+  auth_profile_selected=1
+else
+  MYCODEX_AUTH=""
+  AUTH_SELECTION_SOURCE="not selected"
+fi
+
+case "${auth_command}" in
+  login)
+    if [[ "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+      print_wrapper_auth_help
+      exit 0
+    fi
+    if (( ! auth_profile_selected )); then
+      MYCODEX_AUTH="$(select_auth_profile_interactively)"
+      AUTH_SELECTION_SOURCE="interactive selection"
+      auth_profile_selected=1
+      login_should_persist=1
+    fi
+    ;;
+  auth)
+    if [[ "${2:-status}" == "help" || "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+      print_wrapper_auth_help
+      exit 0
+    fi
+    ;;
+esac
+
+# Commands which do not need a selected profile are handled before profile
+# resolution. This keeps help and status useful during first-run onboarding.
+if (( ! auth_profile_selected )); then
+  case "${auth_command}" in
+    auth)
+      case "${2:-status}" in
+        status)
+          [[ $# -le 2 ]] || die "auth status accepts no arguments"
+          run_unselected_auth_status
+          ;;
+        list)
+          [[ $# -le 2 ]] || die "auth list accepts no arguments"
+          run_auth_list
+          ;;
+        *)
+          die "unknown auth command '${2}'; expected status or list"
+          ;;
+      esac
+      exit 0
+      ;;
+    logout)
+      die "no authentication profile is selected; specify 'logout <profile>'"
+      ;;
+    help|-h|--help)
+      # The built-in profile has no overlay and is sufficient to render help.
+      MYCODEX_AUTH="openai"
+      AUTH_SELECTION_SOURCE="help fallback"
+      auth_profile_selected=1
+      ;;
+    *)
+      running_profile="$(running_auth_profile || true)"
+      if [[ -n "${running_profile}" ]]; then
+        MYCODEX_AUTH="${running_profile}"
+        AUTH_SELECTION_SOURCE="running container"
+        auth_profile_selected=1
+      fi
+      ;;
+  esac
+fi
+
+startup_should_authenticate=0
+startup_credentials_ready=0
+if (( ! auth_profile_selected )); then
+  case "${1:-}" in
+    ""|up|start|restart)
+      if has_controlling_tty; then
+        MYCODEX_AUTH="$(select_auth_profile_interactively)"
+        AUTH_SELECTION_SOURCE="interactive first-run selection"
+        auth_profile_selected=1
+        startup_should_authenticate=1
+      elif has_openai_credential_source; then
+        # Preserve scripts and upgraded installations that already provide the
+        # historical OpenAI credential, but do not persist an implicit choice.
+        MYCODEX_AUTH="openai"
+        AUTH_SELECTION_SOURCE="detected OpenAI credential"
+        auth_profile_selected=1
+      else
+        die "no authentication profile is selected and input is not a terminal.
+myCodex: run '${SCRIPT_DIR}/myCodex login <profile>' once, or use --auth/MYCODEX_AUTH for this invocation"
+      fi
+      ;;
+    *)
+      # Before profiles existed every non-starting command addressed the root
+      # OpenAI Compose definition. Retain that migration behavior when there is
+      # no labeled running container and do not store it as a new preference.
+      MYCODEX_AUTH="openai"
+      AUTH_SELECTION_SOURCE="legacy command fallback"
+      auth_profile_selected=1
+      ;;
+  esac
+fi
+
+# Exported so Compose can stamp the selected profile as a container label.
+validate_profile_id "${MYCODEX_AUTH}"
+export MYCODEX_AUTH
+resolve_auth_profile
 
 # Default to a per-project Codex state volume: it isolates each project's codex
 # home/state and sidesteps the ownership drift a shared, long-lived home volume
@@ -278,4 +1324,94 @@ if [[ "${MYCODEX_SHARED_STATE:-0}" != "1" ]]; then
   private_env=(--private-env)
 fi
 
-exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "$@"
+# Inject the profile's compose overlay ahead of the subcommand so the vendored
+# launcher folds it in via its own -f handling.
+profile_files=()
+if [[ -n "${PROFILE_OVERLAY}" ]]; then
+  profile_files=(-f "${PROFILE_OVERLAY}")
+fi
+
+# Route every Compose invocation the launcher makes through the profile's egress
+# policy, and point the sidecar at the profile's provider config / model.
+export MYCODEX_COMPOSE="vaka --vaka-file=${PROFILE_VAKA_FILE} compose"
+if [[ -n "${PROFILE_LITELLM_CONFIG}" ]]; then
+  export MYCODEX_LITELLM_CONFIG="${PROFILE_LITELLM_CONFIG}"
+fi
+if [[ -n "${MYCODEX_MODEL:-}" || -n "${PROFILE_DEFAULT_MODEL}" ]]; then
+  export MYCODEX_MODEL="${MYCODEX_MODEL:-${PROFILE_DEFAULT_MODEL}}"
+fi
+unset MYCODEX_LEGACY_MODEL
+if [[ -z "${MYCODEX_MODEL:-}" && -n "${PROFILE_LEGACY_DEFAULT_MODEL}" ]]; then
+  export MYCODEX_LEGACY_MODEL="${PROFILE_LEGACY_DEFAULT_MODEL}"
+fi
+
+# Authentication commands are recipe-level operations, not Compose verbs.
+case "${auth_command}" in
+  login)
+    auth_args=("${wrapper_args[@]:1}")
+    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    [[ ${#auth_args[@]} -eq 0 ]] \
+      || die "login accepts at most one profile id"
+    run_login
+    if (( login_should_persist )); then
+      persist_auth_profile "${MYCODEX_AUTH}"
+      echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+    fi
+    exit 0
+    ;;
+  logout)
+    auth_args=("${wrapper_args[@]:1}")
+    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    [[ ${#auth_args[@]} -eq 0 ]] \
+      || die "logout accepts at most one profile id"
+    run_logout
+    exit 0
+    ;;
+  auth)
+    case "${2:-status}" in
+      status)
+        [[ $# -le 2 ]] || die "auth status accepts no arguments"
+        run_auth_status
+        ;;
+      list)
+        [[ $# -le 2 ]] || die "auth list accepts no arguments"
+        run_auth_list
+        ;;
+      *)
+        die "unknown auth command '${2}'; expected status or list"
+        ;;
+    esac
+    exit 0
+    ;;
+  help|-h|--help)
+    launcher help
+    print_wrapper_auth_help
+    exit 0
+    ;;
+esac
+
+if (( startup_should_authenticate )); then
+  run_login
+  persist_auth_profile "${MYCODEX_AUTH}"
+  echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+  startup_credentials_ready=1
+fi
+
+# Refuse to "activate" a profile that differs from the one already running when
+# the verb cannot recreate containers to apply it. `up` is exempt: it recreates,
+# and is the documented way to switch.
+case "${1:-}" in
+  ""|start|restart)
+    guard_profile_switch
+    ;;
+esac
+
+# Secrets are only needed for paths that (re)create the stack. ps/exec/logs/attach
+# render Compose config without them (Compose prints a benign unset-var warning).
+case "${1:-}" in
+  ""|up|start|restart)
+    (( startup_credentials_ready )) || acquire_credentials
+    ;;
+esac
+
+exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"

@@ -6,7 +6,7 @@
 # `docker compose`.
 services:
   codex:
-    image: ghcr.io/infrasecture/harness-workstation:0.146.0
+    image: ghcr.io/infrasecture/harness-workstation:0.147.0-r2
     # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
     # vaka never inspects the image to recover them. The entrypoint starts as
     # root and drops to the host user itself via gosu, so the service runs as
@@ -18,6 +18,11 @@ services:
     tty: true
     stdin_open: true
     working_dir: ${MYCODEX_WORKDIR:-/workspace}
+    # Records which auth profile created this container so ./myCodex can refuse a
+    # profile switch via start/restart (which do not recreate containers) instead
+    # of silently running one profile's config under another's egress policy.
+    labels:
+      agent.vaka.codex.auth-profile: ${MYCODEX_AUTH:-openai}
     depends_on:
       litellm:
         condition: service_started
@@ -37,6 +42,12 @@ services:
       CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
       CODEX_BYOBU_SESSION: codex
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
+      # Optional user/profile model pin for codex-prestart.sh. Empty profiles let
+      # Codex select its current default from its own model catalog.
+      MYCODEX_MODEL: ${MYCODEX_MODEL:-}
+      # One-time migration hint for a model pin written by an older recipe.
+      # prestart removes only an exact generated line and preserves user choices.
+      MYCODEX_LEGACY_MODEL: ${MYCODEX_LEGACY_MODEL:-}
       # The agent reaches the model only through the LiteLLM sidecar; this is
       # the internal proxy key, never the upstream provider key.
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
@@ -64,7 +75,9 @@ services:
       LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
       OTEL_SDK_DISABLED: "true"
     volumes:
-      - ./litellm.config.yaml:/app/config.yaml:ro
+      # Default resolves to the openai config; auth profiles point this at their
+      # own provider config via MYCODEX_LITELLM_CONFIG (set by ./myCodex).
+      - ${MYCODEX_LITELLM_CONFIG:-./litellm.config.yaml}:/app/config.yaml:ro
     expose:
       - "4000"
 

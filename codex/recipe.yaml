@@ -1,15 +1,21 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: Recipe
 name: codex
-version: 0.2.4
+version: 0.3.0
 description: Codex agent in an egress-restricted container with a LiteLLM gateway sidecar
 homepage: https://github.com/infrasecture/vaka-registry/tree/main/codex
-tags: [agent, openai, codex, litellm]
+tags: [agent, openai, codex, litellm, chatgpt]
 minVakaVersion: 0.0.3
 env:
+  - name: MYCODEX_AUTH
+    required: false
+    description: "One-invocation auth-profile override for automation; interactive first startup or myCodex login selects and persists chatgpt, openai, or vertex"
   - name: OPENAI_API_KEY
-    required: true
-    description: Model provider API key consumed only by LiteLLM; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely
+    required: false
+    description: Model provider API key consumed only by LiteLLM in the openai profile; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile is selected
+  - name: MYCODEX_MODEL
+    required: false
+    description: Optional explicit model pin passed to Codex; the OpenAI and ChatGPT profiles otherwise leave selection to Codex, while experimental profiles may define their own default
   - name: LITELLM_MASTER_KEY
     required: false
     description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE or generates and persists one

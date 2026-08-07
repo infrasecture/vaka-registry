@@ -1,0 +1,21 @@
+# LiteLLM config for the Vertex AI profile (SCAFFOLD). vertex_ai/<model> routes
+# authenticate with the service-account file bound at GOOGLE_APPLICATION_CREDENTIALS
+# (see overlay.yaml); project/location come from the environment.
+model_list:
+  - model_name: gemini-2.5-pro
+    litellm_params:
+      model: vertex_ai/gemini-2.5-pro
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: os.environ/VERTEXAI_LOCATION
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: os.environ/VERTEXAI_LOCATION
+
+litellm_settings:
+  telemetry: False
+  drop_params: True
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
