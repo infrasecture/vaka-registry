@@ -17,6 +17,53 @@ This recipe reduces that risk by isolating the agent inside a container with blo
 
 This does not make unsafe code safe, and it does not hide files that you place inside the mounted project directory. If a secret is present under the project directory you run from, the agent may be able to read it. The protection is that the agent should not have a direct network path to send that secret somewhere else.
 
+## Credential Isolation Guarantee
+
+**The Codex container must never receive an upstream provider credential, a
+ChatGPT OAuth token, or the LiteLLM administrator key.** Those credentials are
+supplied exclusively to the LiteLLM sidecar within the container stack. Treat
+any change that places one of them in the Codex environment, filesystem, command
+line, or mounted state as a security defect.
+
+Codex receives only the literal `MYCODEX_GATEWAY_TOKEN=mycodex-agent-v1`. It is
+intentionally non-secret and conveys no capability beyond the inference access
+Codex already has through the private Compose network. A recipe-owned LiteLLM
+custom-auth policy accepts that marker only for an explicit method-and-route
+allowlist covering the Responses API, model listing, response lifecycle, and
+hosted search. LiteLLM management, key, configuration, user, and team routes are
+denied to it. The random LiteLLM administrator key is stored in protected recipe
+state and injected into only the sidecar, where trusted wrapper operations such
+as device login can use it.
+
+The recipe tests render every authentication profile and run the pinned LiteLLM
+image to verify both halves of this contract: privileged variables are absent
+from Codex, and its marker receives HTTP 403 on gateway management routes.
+
+### Required upgrade from 0.3.0 or earlier
+
+Recipe versions through `0.3.0` incorrectly passed the LiteLLM administrator key
+to Codex under the name `OPENAI_API_KEY`. On upgrade, that key is treated as
+compromised rather than reused:
+
+1. If a legacy Codex or LiteLLM container still exists, commands that could use
+   it fail before login or startup and ask you to run `myCodex down`.
+2. `myCodex down` removes both containers but retains the project's Codex state
+   volume. Rerun the original command afterwards.
+3. The wrapper generates a new key in
+   `.secrets/litellm_admin_key_restricted_v1`, removes its old managed
+   `.secrets/litellm_master_key`, and rewrites the managed LiteLLM provider block
+   in the retained Codex configuration.
+
+`LITELLM_MASTER_KEY` and `LITELLM_MASTER_KEY_FILE` overrides are no longer
+accepted because values used with an affected recipe may also have been exposed.
+Unset them; the embedded gateway does not need a user-managed administrator key.
+
+The normal migration preserves Codex configuration and history. Only if retained
+state prevents the new container from starting should you run `myCodex down -v`;
+that fallback deletes the current project's Codex state volume, including its
+configuration and history. It does not remove provider credentials or ChatGPT
+tokens stored under the recipe's `.secrets/` directory.
+
 ## What You Need
 
 - Docker with Compose v2.
@@ -44,15 +91,15 @@ alternatives. After authentication succeeds, the choice is stored under the
 recipe's `.secrets/`, the stack starts, and the launcher attaches to Codex.
 Later invocations reuse that selection without prompting.
 
-### Secret sources
+### Provider credential sources
 
-Each secret is resolved in this order:
+An API-key profile's provider credential is resolved in this order:
 
-1. A direct environment value (`OPENAI_API_KEY` or `LITELLM_MASTER_KEY`).
-2. The file named by `OPENAI_API_KEY_FILE` or `LITELLM_MASTER_KEY_FILE`.
+1. A direct environment value such as `OPENAI_API_KEY`.
+2. The file named by the corresponding `_FILE` variable, such as
+   `OPENAI_API_KEY_FILE`.
 3. Its managed file under the recipe's `.secrets/` directory.
-4. An interactive prompt for the provider key, or random generation for the
-   embedded LiteLLM key.
+4. An interactive prompt.
 
 Set either the direct value or its `_FILE` alternative, not both. Explicit file
 sources may be symlinks and are never copied, rewritten, or chmodded by
@@ -66,10 +113,12 @@ directory is not shipped in the recipe archive; `myCodex` creates it with mode
 `0700` when needed and creates managed files with mode `0600`. Existing files
 and directories are not silently chmodded.
 
-The generated key is stored in `.secrets/litellm_master_key` and reused.
-Keeping it stable prevents an unchanged `myCodex` invocation from recreating
-both containers. The `.secrets` directory is untracked recipe state, so
-`vaka get` updates preserve it.
+The sidecar administrator key is separate from provider credential resolution.
+`myCodex` generates it internally, stores it in
+`.secrets/litellm_admin_key_restricted_v1`, and never accepts it as user input.
+Keeping it stable prevents an unchanged invocation from recreating both
+containers. The `.secrets` directory is untracked recipe state, so `vaka get`
+updates preserve it.
 
 Your project directory is mounted inside the container **at its own host path** (path parity), and that is the working directory. Only that directory is bind-mounted; files outside it are not shared with the container.
 
@@ -120,8 +169,9 @@ succeeds. Failed or cancelled setup therefore leaves the previous selection
 intact.
 
 The agent container is unaffected by the choice: it always reaches the model
-only through the sidecar with the internal proxy key, so switching profiles does
-not widen the agent's egress policy.
+only through the sidecar using the same non-secret, route-restricted marker, so
+switching profiles does not expose provider credentials or widen the agent's
+egress policy.
 
 | Profile | Upstream auth | How you provide it |
 | --- | --- | --- |
@@ -260,8 +310,9 @@ In normal use, Codex sends model requests to:
 http://litellm:4000/v1
 ```
 
-LiteLLM forwards those requests using the real provider API key. Codex receives
-only the local proxy key shared with LiteLLM, never the real provider key.
+LiteLLM forwards those requests using the real provider credential. Codex
+receives neither that credential nor the LiteLLM administrator key; it receives
+only the fixed marker accepted on the inference-route allowlist described above.
 
 ## Practical Security Model
 
@@ -276,6 +327,8 @@ It helps with:
 It does not solve:
 
 - Secrets that are already committed or stored inside the mounted project directory.
+- Content Codex includes in permitted model or hosted-search requests; those
+  requests are intentionally sent through LiteLLM to the configured provider.
 - Commands that change or delete files inside the project directory.
 - Trust decisions about code the agent writes for you.
 - All possible Docker, host, or kernel escape risks.
@@ -327,12 +380,11 @@ From your project directory, run:
 /path/to/codex/myCodex stop
 ```
 
-Starting it again reuses the existing LiteLLM proxy key. To rotate that internal
-key, bring the stack down, remove `.secrets/litellm_master_key` from the recipe
-directory, and start it again. A non-empty `LITELLM_MASTER_KEY` or
-`LITELLM_MASTER_KEY_FILE` overrides the stored key for that invocation and is
-never persisted. Changing the selected key intentionally changes the Compose
-configuration and recreates both services on the next `up`.
+Starting it again reuses the sidecar-only LiteLLM administrator key. To rotate
+that key, bring the stack down, remove
+`.secrets/litellm_admin_key_restricted_v1` from the recipe directory, and start
+again. The wrapper generates a replacement before recreating the services.
+Never remove or replace that file while existing containers are running.
 
 ## How It's Assembled
 
@@ -345,9 +397,10 @@ digest-pinned LiteLLM image; `vaka.yaml` defines the egress policy.
 
 > Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.
 
-> The first `up` after upgrading from 0.2.2 or older establishes the persistent
-> LiteLLM key and may recreate both services once. Later invocations leave
-> unchanged containers in place.
+> Upgrades from `0.3.0` or earlier follow the credential-rotation procedure in
+> [Required upgrade from 0.3.0 or earlier](#required-upgrade-from-030-or-earlier).
+> This security migration recreates both services once while preserving the
+> project's state volume by default.
 
 ## Recipe Tests
 
@@ -359,10 +412,11 @@ codex/tests/run.sh
 ```
 
 The wrapper and profile tests are self-contained. `test_wrapper.sh` covers secret
-resolution; `test_onboarding.py` exercises the real pseudo-terminal first-run
-chooser and headless behavior; `test_profiles.sh` covers profile state and
-precedence, dispatch, the identical-agent-egress invariant, and credential
-handlers; `test_login.sh` covers sidecar scope, early log visibility, readiness
-diagnostics, timeouts, and process/service cleanup. The Compose rendering test
-(`test_compose.py`, which also renders the profile overlays) additionally
-requires Docker Compose.
+resolution; `test_migration.sh` covers legacy-container blocking and key
+rotation; `test_onboarding.py` exercises the real pseudo-terminal first-run
+chooser, ChatGPT continuation, and headless behavior; `test_profiles.sh` covers
+profile state and precedence, dispatch, the identical-agent-egress invariant,
+and credential handlers; `test_login.sh` covers sidecar scope, early log
+visibility, readiness diagnostics, timeouts, and process/service cleanup.
+`test_compose.py` renders every profile, and `test_gateway_auth.sh` exercises the
+auth policy against the pinned LiteLLM image; these tests require Docker.
