@@ -31,6 +31,8 @@ def clean_env(fake_bin: Path, capture: Path) -> dict[str, str]:
         "MYCODEX_VERTEX_CREDENTIALS",
         "OPENAI_API_KEY",
         "OPENAI_API_KEY_FILE",
+        "LITELLM_MASTER_KEY",
+        "LITELLM_MASTER_KEY_FILE",
     ):
         env.pop(name, None)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
@@ -100,7 +102,8 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         ": \"${MYCODEX_TEST_CAPTURE:?}\"\n"
-        "printf '%s\\n' \"$@\" > \"${MYCODEX_TEST_CAPTURE}\"\n",
+        "printf '%s\\n' \"$@\" > \"${MYCODEX_TEST_CAPTURE}\"\n"
+        "printf '%s\\n' \"${LITELLM_MASTER_KEY-}\" > \"${MYCODEX_TEST_CAPTURE}.gateway-admin\"\n",
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -147,8 +150,35 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         fail("successful onboarding did not persist the chosen profile", output)
     print("ok: first interactive startup chooses authentication before prompting for a key")
 
-    for managed in ("auth_profile", "openai_api_key"):
-        (recipe / ".secrets" / managed).unlink()
+    # ChatGPT device login runs in a cleanup-scoped subshell. A complete token
+    # makes this deterministic while proving the parent reacquires the managed
+    # LiteLLM administrator key before it launches the requested stack.
+    (recipe / ".secrets" / "auth_profile").unlink()
+    (recipe / ".secrets" / "openai_api_key").unlink()
+    token_dir = recipe / ".secrets" / "chatgpt-token"
+    token_dir.mkdir(mode=0o700)
+    (token_dir / "auth.json").write_text(
+        '{"access_token":"existing-chatgpt-token"}\n', encoding="utf-8"
+    )
+    capture.unlink()
+    (Path(f"{capture}.gateway-admin")).unlink(missing_ok=True)
+    code, output = run_in_pty(
+        command,
+        workspace,
+        clean_env(fake_bin, capture),
+        [(b"Profile [1]:", b"1\n")],
+    )
+    if code != 0:
+        fail(f"ChatGPT first startup exited {code}", output)
+    gateway_key = Path(f"{capture}.gateway-admin").read_text().strip()
+    managed_key = recipe / ".secrets" / "litellm_admin_key_restricted_v1"
+    if not gateway_key or gateway_key != managed_key.read_text().strip():
+        fail("ChatGPT first startup lost the sidecar administrator key after device login", output)
+    if (recipe / ".secrets" / "auth_profile").read_text().strip() != "chatgpt":
+        fail("ChatGPT first startup did not persist its selected profile", output)
+    print("ok: ChatGPT first startup reacquires sidecar credentials after device login")
+
+    (recipe / ".secrets" / "auth_profile").unlink()
     capture.unlink()
 
     result = subprocess.run(

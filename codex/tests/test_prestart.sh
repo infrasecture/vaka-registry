@@ -48,6 +48,24 @@ run_prestart
 [[ "$(grep -c '^model = "user-choice"$' "${CONFIG}")" == "1" ]] || fail "user model line not preserved idempotently"
 [[ "$(grep -c '^\[model_providers.litellm\]$' "${CONFIG}")" == "1" ]] || fail "provider table duplicated on re-run"
 
+# Upgrade in place: replace the old administrator-key alias in the persistent
+# state volume while preserving unrelated user and project configuration.
+cat >> "${CONFIG}" <<'EOF'
+
+[model_providers.litellm]
+name = "old recipe block"
+base_url = "http://litellm:4000/v1"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+EOF
+run_prestart
+[[ "$(grep -c '^\[model_providers.litellm\]$' "${CONFIG}")" == "1" ]] \
+  || fail "legacy provider table was not replaced in place"
+grep -Fxq 'env_key = "MYCODEX_GATEWAY_TOKEN"' "${CONFIG}" \
+  || fail "legacy provider table did not migrate to restricted gateway auth"
+grep -Fxq 'trust_level = "trusted"' "${CONFIG}" \
+  || fail "provider migration damaged unrelated persistent configuration"
+
 # --- profile with a pin: MYCODEX_MODEL set -> replaces the user's model --------
 seed_config
 run_prestart MYCODEX_MODEL=gpt-5.6-terra

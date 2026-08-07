@@ -59,6 +59,11 @@ def assert_credential_boundary(compose, profile):
         raise SystemExit(f"FAIL: {profile} LiteLLM did not receive its administrator key")
     if codex_label(compose, "agent.vaka.codex.gateway-auth") != "restricted-v1":
         raise SystemExit(f"FAIL: {profile} Codex lacks the restricted-auth contract label")
+    litellm_label = compose["services"]["litellm"].get("labels", {}).get(
+        "agent.vaka.codex.gateway-auth"
+    )
+    if litellm_label != "restricted-v1":
+        raise SystemExit(f"FAIL: {profile} LiteLLM lacks the restricted-auth contract label")
     if not has_mount(compose["services"]["litellm"], "/app/litellm_agent_auth.py"):
         raise SystemExit(f"FAIL: {profile} LiteLLM does not mount the agent auth policy")
 
