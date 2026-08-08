@@ -1204,7 +1204,9 @@ run_chatgpt_device_flow() (
   local remaining probe_status sleep_for
   local request_timeout=$((login_timeout + 5))
 
-  echo "myCodex: waiting up to ${login_timeout}s for browser authorization and MFA; press Ctrl-C to cancel." >&2
+  echo "myCodex: LiteLLM is ready; requesting one ChatGPT verification code now." >&2
+  echo "myCodex: when the URL and code appear below, complete browser authorization and MFA within ${login_timeout}s." >&2
+  echo "myCodex: press Ctrl-C to cancel." >&2
   trigger_chatgpt_device_flow "${container_id}" "${model}" "${request_timeout}"
   probe_pid="${CHATGPT_PROBE_PID}"
 
@@ -1298,6 +1300,8 @@ run_oauth_device_login() (
 
   discard_incomplete_chatgpt_auth "${token_file}"
   log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "myCodex: LiteLLM may print transient startup errors while it initializes." >&2
+  echo "myCodex: keep waiting for the verification URL and code; authentication has failed only if myCodex prints a final error." >&2
   echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
   launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
 

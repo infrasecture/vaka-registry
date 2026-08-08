@@ -46,6 +46,7 @@ case "${args}" in
       exit 0
     }
     trap cleanup INT TERM
+    echo "ERROR transient provider initialization message" >&2
     echo "Sign in with ChatGPT using device code:" >&2
     echo "1) Visit https://auth.openai.com/codex/device" >&2
     echo "2) Enter code: TEST-CODE" >&2
@@ -199,6 +200,10 @@ grep -Fq 'ConnectionRefusedError: simulated refusal' <<< "${output}" \
   || fail "readiness timeout hid the last probe diagnostic"
 grep -Fq 'Enter code: TEST-CODE' <<< "${output}" \
   || fail "startup device-code output was hidden behind readiness"
+[[ "${output}" == *"LiteLLM may print transient startup errors"*"ERROR transient provider initialization message"* ]] \
+  || fail "transient LiteLLM output appeared before the startup guidance"
+grep -Fq 'authentication has failed only if myCodex prints a final error' <<< "${output}" \
+  || fail "startup guidance did not distinguish transient output from terminal failure"
 [[ "$(request_count)" == "0" ]] || fail "OAuth started before LiteLLM was ready"
 grep -Eq 'up -d litellm$' "${LAUNCHER_CALLS}" \
   || fail "login did not scope startup to the LiteLLM service"
@@ -266,8 +271,10 @@ reset_case
 if output="$(run_login wait 5 1 2>&1)"; then
   fail "login succeeded without a token"
 fi
-grep -Fq 'waiting up to 1s for browser authorization and MFA' <<< "${output}" \
-  || fail "human authorization wait was not announced"
+grep -Fq 'complete browser authorization and MFA within 1s' <<< "${output}" \
+  || fail "human authorization deadline was not announced"
+grep -Fq 'LiteLLM is ready; requesting one ChatGPT verification code now' <<< "${output}" \
+  || fail "device-code request transition was not announced"
 grep -Fq 'device code expired after 1s' <<< "${output}" \
   || fail "authorization timeout did not explain how to retry"
 [[ "$(request_count)" == "1" ]] || fail "timed-out device flow was retried"

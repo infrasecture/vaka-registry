@@ -247,6 +247,13 @@ refreshes it automatically thereafter. If you already have a Codex
 `~/.codex/auth.json`, import it instead with
 `MYCODEX_CHATGPT_AUTH=~/.codex/auth.json ./myCodex login chatgpt`.
 
+On a first device login, LiteLLM can emit transient provider and initialization
+errors before it is ready to display the verification code. The wrapper warns
+about that output before starting the sidecar and tells you when readiness has
+succeeded and the single device-code request begins. Keep waiting through those
+startup messages; authentication has failed only when `myCodex` prints a final
+error and exits.
+
 Login starts only the LiteLLM service; it does not create or replace the Codex
 container. Output is followed from the beginning of the current attempt before
 readiness is checked, so a device URL/code or startup failure cannot be hidden
