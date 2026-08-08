@@ -140,7 +140,7 @@ grep -Fxq 'MYCODEX_LEGACY_MODEL=gpt-5.3-codex' "${chatgpt_capture}.env" \
 grep -Fxq 'OPENAI_API_KEY_SET=' "${chatgpt_capture}.env" \
   || fail "chatgpt profile must not require OPENAI_API_KEY"
 grep -Fxq 'LITELLM_MASTER_KEY_SET=yes' "${chatgpt_capture}.env" \
-  || fail "chatgpt profile did not mint the internal proxy key"
+  || fail "chatgpt profile did not mint the sidecar administrator key"
 [[ -d "${RECIPE}/.secrets/chatgpt-token" ]] || fail "chatgpt profile did not create the token dir"
 echo "ok: chatgpt profile switches overlay/config/policy without forcing Codex's model"
 

@@ -36,12 +36,35 @@ run_prestart
 grep -Fxq 'model = "user-choice"' "${CONFIG}" || fail "default profile deleted the user's model line"
 grep -Fxq 'model_provider = "litellm"' "${CONFIG}" || fail "default profile did not set the litellm provider"
 grep -Fq '[model_providers.litellm]' "${CONFIG}" || fail "default profile did not add the provider table"
+grep -Fxq 'env_key = "MYCODEX_GATEWAY_TOKEN"' "${CONFIG}" \
+  || fail "provider does not use the restricted gateway token"
+if grep -Fq 'env_key = "OPENAI_API_KEY"' "${CONFIG}"; then
+  fail "provider retained the legacy administrator-key alias"
+fi
 grep -Fxq 'trust_level = "trusted"' "${CONFIG}" || fail "default profile dropped the projects table"
 
 # Idempotent: a second run keeps the user's model and does not duplicate blocks.
 run_prestart
 [[ "$(grep -c '^model = "user-choice"$' "${CONFIG}")" == "1" ]] || fail "user model line not preserved idempotently"
 [[ "$(grep -c '^\[model_providers.litellm\]$' "${CONFIG}")" == "1" ]] || fail "provider table duplicated on re-run"
+
+# Upgrade in place: replace the old administrator-key alias in the persistent
+# state volume while preserving unrelated user and project configuration.
+cat >> "${CONFIG}" <<'EOF'
+
+[model_providers.litellm]
+name = "old recipe block"
+base_url = "http://litellm:4000/v1"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+EOF
+run_prestart
+[[ "$(grep -c '^\[model_providers.litellm\]$' "${CONFIG}")" == "1" ]] \
+  || fail "legacy provider table was not replaced in place"
+grep -Fxq 'env_key = "MYCODEX_GATEWAY_TOKEN"' "${CONFIG}" \
+  || fail "legacy provider table did not migrate to restricted gateway auth"
+grep -Fxq 'trust_level = "trusted"' "${CONFIG}" \
+  || fail "provider migration damaged unrelated persistent configuration"
 
 # --- profile with a pin: MYCODEX_MODEL set -> replaces the user's model --------
 seed_config

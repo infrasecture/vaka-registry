@@ -1,7 +1,7 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: Recipe
 name: codex
-version: 0.3.0
+version: 0.3.1
 description: Codex agent in an egress-restricted container with a LiteLLM gateway sidecar
 homepage: https://github.com/infrasecture/vaka-registry/tree/main/codex
 tags: [agent, openai, codex, litellm, chatgpt]
@@ -16,6 +16,3 @@ env:
   - name: MYCODEX_MODEL
     required: false
     description: Optional explicit model pin passed to Codex; the OpenAI and ChatGPT profiles otherwise leave selection to Codex, while experimental profiles may define their own default
-  - name: LITELLM_MASTER_KEY
-    required: false
-    description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE or generates and persists one

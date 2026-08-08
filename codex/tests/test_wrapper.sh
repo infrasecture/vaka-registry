@@ -45,7 +45,7 @@ capture_two="${TMP}/capture-two"
 run_wrapper "${capture_one}" OPENAI_API_KEY=test-provider-key
 
 secret_dir="${RECIPE}/.secrets"
-secret_file="${secret_dir}/litellm_master_key"
+secret_file="${secret_dir}/litellm_admin_key_restricted_v1"
 [[ -f "${secret_file}" && ! -L "${secret_file}" ]] || fail "generated key is not a managed regular file"
 [[ "$(mode_of "${secret_dir}")" == "700" ]] || fail "created secret directory mode is not 0700"
 [[ "$(mode_of "${secret_file}")" == "600" ]] || fail "created secret file mode is not 0600"
@@ -69,37 +69,23 @@ run_wrapper "${TMP}/capture-existing-mode" OPENAI_API_KEY=test-provider-key
 [[ "$(mode_of "${secret_dir}")" == "750" ]] || fail "existing managed directory mode was changed"
 [[ "$(mode_of "${secret_file}")" == "640" ]] || fail "existing managed file mode was changed"
 
-persisted_before="$(<"${secret_file}")"
-override_capture="${TMP}/capture-override"
-run_wrapper "${override_capture}" \
-  OPENAI_API_KEY=test-provider-key \
-  LITELLM_MASTER_KEY=explicit-test-override
-[[ "$(<"${override_capture}.proxy")" == "explicit-test-override" ]] || fail "environment override was not honored"
-[[ "$(<"${secret_file}")" == "${persisted_before}" ]] || fail "environment override modified persisted state"
-
-# Explicit *_FILE inputs intentionally follow symlinks and are not chmodded.
+# Explicit provider *_FILE inputs intentionally follow symlinks and are not
+# chmodded. The embedded gateway administrator key is deliberately not an input.
 external_provider="${TMP}/provider-key"
-external_proxy="${TMP}/proxy-key"
 printf '%s\n' 'provider-from-file' > "${external_provider}"
-printf '%s\n' 'proxy-from-file' > "${external_proxy}"
-chmod 644 "${external_provider}" "${external_proxy}"
+chmod 644 "${external_provider}"
 ln -s "${external_provider}" "${TMP}/provider-link"
-ln -s "${external_proxy}" "${TMP}/proxy-link"
 file_capture="${TMP}/capture-file"
 run_wrapper "${file_capture}" \
-  OPENAI_API_KEY_FILE="${TMP}/provider-link" \
-  LITELLM_MASTER_KEY_FILE="${TMP}/proxy-link"
+  OPENAI_API_KEY_FILE="${TMP}/provider-link"
 [[ "$(<"${file_capture}.provider")" == "provider-from-file" ]] || fail "provider *_FILE input was not honored"
-[[ "$(<"${file_capture}.proxy")" == "proxy-from-file" ]] || fail "proxy *_FILE input was not honored"
 [[ "$(mode_of "${external_provider}")" == "644" ]] || fail "provider *_FILE target mode was changed"
-[[ "$(mode_of "${external_proxy}")" == "644" ]] || fail "proxy *_FILE target mode was changed"
-[[ "$(<"${secret_file}")" == "${persisted_before}" ]] || fail "explicit file input modified persisted state"
+cmp -s "${file_capture}.proxy" "${secret_file}" || fail "provider file input changed the gateway key"
 
 ambiguous_error="${TMP}/ambiguous-error"
 if run_wrapper "${TMP}/capture-ambiguous" \
   OPENAI_API_KEY=test-provider-key \
-  OPENAI_API_KEY_FILE="${external_provider}" \
-  LITELLM_MASTER_KEY=proxy-key > /dev/null 2> "${ambiguous_error}"; then
+  OPENAI_API_KEY_FILE="${external_provider}" > /dev/null 2> "${ambiguous_error}"; then
   fail "ambiguous value and file inputs were accepted"
 fi
 grep -Fq 'set only one of OPENAI_API_KEY and OPENAI_API_KEY_FILE' "${ambiguous_error}" || \
@@ -113,12 +99,13 @@ fi
 grep -Fq 'is empty' "${empty_error}" || fail "empty-key failure was not actionable"
 
 rm -f -- "${secret_file}"
-ln -s "${external_proxy}" "${secret_file}"
+ln -s "${external_provider}" "${secret_file}"
 managed_link_error="${TMP}/managed-link-error"
 if run_wrapper "${TMP}/capture-managed-link" OPENAI_API_KEY=test-provider-key > /dev/null 2> "${managed_link_error}"; then
   fail "symlinked managed key was accepted"
 fi
-grep -Fq 'set LITELLM_MASTER_KEY_FILE' "${managed_link_error}" || fail "managed-key symlink failure lacked the explicit-file remedy"
+grep -Fq 'managed secret files must be regular files' "${managed_link_error}" \
+  || fail "managed-key symlink failure was not actionable"
 
 rm -rf -- "${secret_dir}"
 external_secret_dir="${TMP}/external-secrets"
@@ -130,15 +117,6 @@ if run_wrapper "${TMP}/capture-managed-dir" OPENAI_API_KEY=test-provider-key > /
 fi
 grep -Fq 'managed secret storage must be a real directory' "${managed_dir_error}" || \
   fail "managed-directory symlink failure was not actionable"
-
-external_only_capture="${TMP}/capture-external-only"
-run_wrapper "${external_only_capture}" \
-  OPENAI_API_KEY_FILE="${TMP}/provider-link" \
-  LITELLM_MASTER_KEY_FILE="${TMP}/proxy-link"
-[[ "$(<"${external_only_capture}.provider")" == "provider-from-file" ]] || \
-  fail "explicit provider file did not bypass managed storage"
-[[ "$(<"${external_only_capture}.proxy")" == "proxy-from-file" ]] || \
-  fail "explicit proxy file did not bypass managed storage"
 
 rm -f -- "${secret_dir}"
 mkdir -m 700 "${secret_dir}"
@@ -153,7 +131,7 @@ wait "${pid_two}"
 cmp -s "${concurrent_one}.proxy" "${concurrent_two}.proxy" || fail "concurrent launches selected different keys"
 cmp -s "${concurrent_one}.proxy" "${secret_file}" || fail "concurrent winner was not persisted"
 shopt -s nullglob
-temporary_keys=("${secret_dir}"/.litellm_master_key.*)
+temporary_keys=("${secret_dir}"/.litellm_admin_key_restricted_v1.*)
 shopt -u nullglob
 if [[ ${#temporary_keys[@]} -ne 0 ]]; then
   fail "temporary key file remained after concurrent publication"

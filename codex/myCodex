@@ -2,8 +2,9 @@
 # Thin recipe wrapper around the vendored upstream launcher (bin/myCodex).
 #
 # It adds only what upstream does not provide: it selects and acquires provider
-# credentials, maintains an internal LiteLLM proxy key, and routes every Compose
-# call through vaka for egress enforcement (MYCODEX_COMPOSE). Everything else —
+# credentials, maintains a sidecar-only LiteLLM administrator key, and routes
+# every Compose call through vaka for egress enforcement (MYCODEX_COMPOSE).
+# Everything else —
 # host identity, path-parity workdir, per-project state (--private-env),
 # attach/exec, and readiness — is handled by the vendored launcher unchanged.
 
@@ -12,7 +13,7 @@ recipe_bash_is_supported() {
     (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
 }
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Fail or re-exec before secret prompting. The vendored launcher owns the full
 # diagnostic; this wrapper only handles a valid $SHELL early enough to preserve
@@ -49,12 +50,98 @@ set -euo pipefail
 
 CALLER_DIR="$(pwd -P)"
 
-# Running from the recipe directory would bind-mount this directory — including
-# .secrets — into the container as the workspace. Refuse it.
-if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
-  echo "myCodex: running from its own directory exposes secrets inside the container; run it from a project dir." >&2
+RECIPE_WORKSPACES_DIR="${SCRIPT_DIR}/.workspaces"
+RECIPE_WORKSPACE_DEFAULT="work"
+
+recipe_workspace_name_is_valid() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$ ]]
+}
+
+recipe_workspace_die() {
+  echo "myCodex: $*" >&2
   exit 2
+}
+
+select_recipe_workspace() {
+  local workspace_root workspace_root_real workspace_name workspace_path
+  local workspace_path_real created=0
+
+  workspace_root="${RECIPE_WORKSPACES_DIR}"
+  if [[ -L "${workspace_root}" ]]; then
+    recipe_workspace_die "${workspace_root} is a symlink; refusing to use it for agent workspaces"
+  fi
+  if [[ -e "${workspace_root}" && ! -d "${workspace_root}" ]]; then
+    recipe_workspace_die "${workspace_root} exists but is not a directory"
+  fi
+  mkdir -p -- "${workspace_root}" \
+    || recipe_workspace_die "failed to create workspace directory ${workspace_root}"
+  [[ ! -L "${workspace_root}" && -d "${workspace_root}" ]] \
+    || recipe_workspace_die "${workspace_root} did not remain a real directory"
+  workspace_root_real="$(cd -- "${workspace_root}" && pwd -P)" \
+    || recipe_workspace_die "failed to resolve workspace directory ${workspace_root}"
+  [[ "${workspace_root_real}" == "${workspace_root}" ]] \
+    || recipe_workspace_die "${workspace_root} resolves outside the recipe workspace namespace"
+
+  echo "myCodex: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
+  echo "myCodex: each workspace name gets a separate project, container, and Codex state volume." >&2
+  if { : < /dev/tty > /dev/tty; } 2>/dev/null; then
+    while :; do
+      printf 'Workspace name [%s]: ' "${RECIPE_WORKSPACE_DEFAULT}" > /dev/tty
+      IFS= read -r workspace_name < /dev/tty || exit 130
+      [[ -n "${workspace_name}" ]] || workspace_name="${RECIPE_WORKSPACE_DEFAULT}"
+      if recipe_workspace_name_is_valid "${workspace_name}"; then
+        break
+      fi
+      echo "myCodex: use 1-63 lowercase letters, digits, '_' or '-'; start and end with a letter or digit." > /dev/tty
+    done
+  else
+    workspace_name="${RECIPE_WORKSPACE_DEFAULT}"
+    echo "myCodex: no interactive terminal; using default workspace '${workspace_name}'." >&2
+  fi
+
+  workspace_path="${workspace_root}/${workspace_name}"
+  if [[ -L "${workspace_path}" ]]; then
+    recipe_workspace_die "workspace '${workspace_name}' is a symlink; choose another name or remove it"
+  fi
+  if [[ -e "${workspace_path}" && ! -d "${workspace_path}" ]]; then
+    recipe_workspace_die "workspace '${workspace_name}' exists but is not a directory"
+  fi
+  if [[ ! -e "${workspace_path}" ]]; then
+    mkdir -- "${workspace_path}" \
+      || recipe_workspace_die "failed to create workspace ${workspace_path}"
+    created=1
+  fi
+  [[ ! -L "${workspace_path}" && -d "${workspace_path}" ]] \
+    || recipe_workspace_die "workspace '${workspace_name}' did not remain a real directory"
+  workspace_path_real="$(cd -- "${workspace_path}" && pwd -P)" \
+    || recipe_workspace_die "failed to resolve workspace ${workspace_path}"
+  [[ "$(dirname -- "${workspace_path_real}")" == "${workspace_root_real}" ]] \
+    || recipe_workspace_die "workspace '${workspace_name}' resolves outside ${workspace_root}"
+
+  cd -- "${workspace_path_real}" \
+    || recipe_workspace_die "failed to enter workspace ${workspace_path_real}"
+  CALLER_DIR="$(pwd -P)"
+  if (( created )); then
+    echo "myCodex: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+  else
+    echo "myCodex: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+  fi
+}
+
+GATEWAY_AUTH_CONTRACT="restricted-v1"
+GATEWAY_ADMIN_KEY_RESOLVED=0
+GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED=0
+if [[ -n "${LITELLM_MASTER_KEY-}" || -n "${LITELLM_MASTER_KEY_FILE-}" ]]; then
+  GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED=1
 fi
+
+# Never bind-mount the recipe root, which contains managed credentials. A launch
+# from that directory is redirected into a named child of .workspaces instead.
+if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
+  select_recipe_workspace
+fi
+
+unset -f recipe_workspace_name_is_valid recipe_workspace_die select_recipe_workspace
 
 # Pinned harness image, kept in sync with docker-compose.yaml. Setting these
 # makes the launcher's pre-up image-tag resolution use this value verbatim
@@ -257,6 +344,37 @@ resolve_secret_env() {
   export "${env_name}=${env_value}"
 }
 
+# The LiteLLM master key is an implementation credential for the embedded
+# sidecar, not a user-facing credential. Versioning its managed filename rotates
+# the key that recipe versions through 0.3.0 exposed to the Codex container.
+resolve_gateway_admin_key() {
+  (( GATEWAY_ADMIN_KEY_RESOLVED == 0 )) || return 0
+
+  if (( GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED )); then
+    die "LITELLM_MASTER_KEY and LITELLM_MASTER_KEY_FILE are no longer accepted.
+myCodex: older recipes exposed that administrator key to Codex, so it must not be reused.
+myCodex: unset the override; myCodex will generate a sidecar-only replacement automatically."
+  fi
+
+  unset LITELLM_MASTER_KEY LITELLM_MASTER_KEY_FILE
+  resolve_secret_env \
+    LITELLM_MASTER_KEY litellm_admin_key_restricted_v1 generate
+
+  local legacy_file="${SCRIPT_DIR}/.secrets/litellm_master_key"
+  if [[ -L "${legacy_file}" ]]; then
+    die "${legacy_file} is a symlink; refusing to remove legacy managed key state"
+  fi
+  if [[ -e "${legacy_file}" ]]; then
+    [[ -f "${legacy_file}" ]] \
+      || die "${legacy_file} is not a regular file; remove it manually"
+    rm -f -- "${legacy_file}" \
+      || die "failed to remove exposed legacy gateway key ${legacy_file}"
+    echo "myCodex: rotated the legacy LiteLLM administrator key for restricted gateway auth." >&2
+  fi
+
+  GATEWAY_ADMIN_KEY_RESOLVED=1
+}
+
 die() {
   echo "myCodex: $*" >&2
   exit 2
@@ -267,8 +385,9 @@ die() {
 #
 # The persisted selection chooses how LiteLLM authenticates upstream;
 # --auth/MYCODEX_AUTH can override it for one invocation. The agent container is
-# auth-agnostic: it always speaks to the sidecar with the internal proxy key, so
-# only the sidecar's provider config, credential, and egress change.
+# auth-agnostic: it always speaks to the sidecar with a fixed, route-restricted,
+# non-secret marker, so only the sidecar's provider config, credential, and
+# egress change.
 #
 # The built-in profile "openai" is realized by the recipe's root files
 # (docker-compose.yaml, vaka.yaml, litellm.config.yaml) and needs no overlay, so
@@ -534,7 +653,7 @@ acquire_credentials() {
       die "profile '${MYCODEX_AUTH}': unknown CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
       ;;
   esac
-  resolve_secret_env LITELLM_MASTER_KEY litellm_master_key generate
+  resolve_gateway_admin_key
 }
 
 # `docker compose start`/`restart` (and attaching to an already-running stack) do
@@ -681,6 +800,39 @@ running_auth_profile() {
   command -v docker >/dev/null 2>&1 || return 1
   docker inspect --format '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
     "${CODEX_CONTAINER_NAME}" 2>/dev/null
+}
+
+gateway_sidecar_container_ids() {
+  docker ps --all --quiet \
+    --filter "label=com.docker.compose.project=${CODEX_PROJECT_NAME}" \
+    --filter "label=com.docker.compose.service=litellm" 2>/dev/null
+}
+
+guard_gateway_auth_migration() {
+  command -v docker >/dev/null 2>&1 \
+    || die "docker is required to verify the gateway credential migration"
+
+  local container contract sidecar_ids
+  local containers=("${CODEX_CONTAINER_NAME}")
+  if ! sidecar_ids="$(gateway_sidecar_container_ids)"; then
+    die "cannot inspect Docker containers for the gateway credential migration; check the selected Docker daemon and retry"
+  fi
+  while IFS= read -r container; do
+    [[ -n "${container}" ]] && containers+=("${container}")
+  done <<< "${sidecar_ids}"
+
+  for container in "${containers[@]}"; do
+    contract="$(docker inspect --format \
+      '{{ index .Config.Labels "agent.vaka.codex.gateway-auth" }}' \
+      "${container}" 2>/dev/null)" || continue
+    [[ "${contract}" == "${GATEWAY_AUTH_CONTRACT}" ]] && continue
+
+    die "existing container '${container}' predates restricted gateway authentication and may contain or accept the LiteLLM administrator key.
+myCodex: remove the legacy containers before continuing:
+  ${SCRIPT_DIR}/myCodex down
+myCodex: this keeps the Codex state volume; retry the original command afterwards.
+myCodex: only if retained Codex configuration prevents startup, use '${SCRIPT_DIR}/myCodex down -v' to delete that project's configuration and history."
+  done
 }
 
 run_auth_status() {
@@ -1052,7 +1204,9 @@ run_chatgpt_device_flow() (
   local remaining probe_status sleep_for
   local request_timeout=$((login_timeout + 5))
 
-  echo "myCodex: waiting up to ${login_timeout}s for browser authorization and MFA; press Ctrl-C to cancel." >&2
+  echo "myCodex: LiteLLM is ready; requesting one ChatGPT verification code now." >&2
+  echo "myCodex: when the URL and code appear below, complete browser authorization and MFA within ${login_timeout}s." >&2
+  echo "myCodex: press Ctrl-C to cancel." >&2
   trigger_chatgpt_device_flow "${container_id}" "${model}" "${request_timeout}"
   probe_pid="${CHATGPT_PROBE_PID}"
 
@@ -1146,6 +1300,8 @@ run_oauth_device_login() (
 
   discard_incomplete_chatgpt_auth "${token_file}"
   log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "myCodex: LiteLLM may print transient startup errors while it initializes." >&2
+  echo "myCodex: keep waiting for the verification URL and code; authentication has failed only if myCodex prints a final error." >&2
   echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
   launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
 
@@ -1193,6 +1349,25 @@ if [[ -n "${auth_option}" && -n "${auth_command_profile}" \
     && "${auth_option}" != "${auth_command_profile}" ]]; then
   die "conflicting auth profiles: --auth=${auth_option} and ${auth_command} ${auth_command_profile}"
 fi
+
+# Commands which may create, start, or enter Codex must never reuse a container
+# from a recipe that placed the gateway administrator key in the agent's
+# environment. Cleanup and read-only diagnostic commands remain available so the
+# user can inspect and remove that container. This runs before profile selection
+# or any login flow.
+case "${auth_command}" in
+  help|-h|--help|auth|logout)
+    ;;
+  *)
+    case "${1:-}" in
+      down|stop|kill|rm|ps|logs|info|config|pull)
+        ;;
+      *)
+        guard_gateway_auth_migration
+        ;;
+    esac
+    ;;
+esac
 
 auth_profile_selected=0
 login_should_persist=0
@@ -1279,7 +1454,6 @@ if (( ! auth_profile_selected )); then
 fi
 
 startup_should_authenticate=0
-startup_credentials_ready=0
 if (( ! auth_profile_selected )); then
   case "${1:-}" in
     ""|up|start|restart)
@@ -1394,7 +1568,6 @@ if (( startup_should_authenticate )); then
   run_login
   persist_auth_profile "${MYCODEX_AUTH}"
   echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
-  startup_credentials_ready=1
 fi
 
 # Refuse to "activate" a profile that differs from the one already running when
@@ -1410,7 +1583,7 @@ esac
 # render Compose config without them (Compose prints a benign unset-var warning).
 case "${1:-}" in
   ""|up|start|restart)
-    (( startup_credentials_ready )) || acquire_credentials
+    acquire_credentials
     ;;
 esac
 

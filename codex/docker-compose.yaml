@@ -23,6 +23,7 @@ services:
     # of silently running one profile's config under another's egress policy.
     labels:
       agent.vaka.codex.auth-profile: ${MYCODEX_AUTH:-openai}
+      agent.vaka.codex.gateway-auth: restricted-v1
     depends_on:
       litellm:
         condition: service_started
@@ -48,9 +49,10 @@ services:
       # One-time migration hint for a model pin written by an older recipe.
       # prestart removes only an exact generated line and preserves user choices.
       MYCODEX_LEGACY_MODEL: ${MYCODEX_LEGACY_MODEL:-}
-      # The agent reaches the model only through the LiteLLM sidecar; this is
-      # the internal proxy key, never the upstream provider key.
-      OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+      # Fixed, non-secret client marker. LiteLLM restricts it to the exact
+      # inference routes in litellm_agent_auth.py; no provider or gateway
+      # administrator credential enters the Codex container.
+      MYCODEX_GATEWAY_TOKEN: mycodex-agent-v1
     # Inject the LiteLLM provider into codex config, then keep the container
     # alive. This replaces the image entrypoint's default keep-alive; the tmux
     # session used by `./myCodex attach` is still created by the entrypoint
@@ -65,10 +67,13 @@ services:
   litellm:
     image: docker.litellm.ai/berriai/litellm:main-stable@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e
     init: true
+    labels:
+      agent.vaka.codex.gateway-auth: restricted-v1
     command: ["--config", "/app/config.yaml", "--telemetry", "False", "--debug"]
     environment:
       LITELLM_MASTER_KEY:
       OPENAI_API_KEY:
+      MYCODEX_GATEWAY_TOKEN: mycodex-agent-v1
       DISABLE_ADMIN_UI: "True"
       NO_DOCS: "True"
       NO_REDOC: "True"
@@ -78,6 +83,7 @@ services:
       # Default resolves to the openai config; auth profiles point this at their
       # own provider config via MYCODEX_LITELLM_CONFIG (set by ./myCodex).
       - ${MYCODEX_LITELLM_CONFIG:-./litellm.config.yaml}:/app/config.yaml:ro
+      - ./litellm_agent_auth.py:/app/litellm_agent_auth.py:ro
     expose:
       - "4000"
 

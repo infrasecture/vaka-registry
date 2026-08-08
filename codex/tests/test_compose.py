@@ -40,8 +40,37 @@ def codex_label(compose, key):
     return compose["services"]["codex"].get("labels", {}).get(key)
 
 
+def assert_credential_boundary(compose, profile):
+    codex_env = compose["services"]["codex"].get("environment", {})
+    litellm_env = compose["services"]["litellm"].get("environment", {})
+    forbidden = {
+        "LITELLM_MASTER_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
+    leaked = sorted(forbidden.intersection(codex_env))
+    if leaked:
+        raise SystemExit(
+            f"FAIL: {profile} Codex environment contains privileged credential(s): {leaked}"
+        )
+    if codex_env.get("MYCODEX_GATEWAY_TOKEN") != "mycodex-agent-v1":
+        raise SystemExit(f"FAIL: {profile} Codex does not use the restricted gateway token")
+    if litellm_env.get("LITELLM_MASTER_KEY") != "test-proxy-key":
+        raise SystemExit(f"FAIL: {profile} LiteLLM did not receive its administrator key")
+    if codex_label(compose, "agent.vaka.codex.gateway-auth") != "restricted-v1":
+        raise SystemExit(f"FAIL: {profile} Codex lacks the restricted-auth contract label")
+    litellm_label = compose["services"]["litellm"].get("labels", {}).get(
+        "agent.vaka.codex.gateway-auth"
+    )
+    if litellm_label != "restricted-v1":
+        raise SystemExit(f"FAIL: {profile} LiteLLM lacks the restricted-auth contract label")
+    if not has_mount(compose["services"]["litellm"], "/app/litellm_agent_auth.py"):
+        raise SystemExit(f"FAIL: {profile} LiteLLM does not mount the agent auth policy")
+
+
 # --- default (openai) profile: the CI-audited artifact --------------------
 compose = render()
+assert_credential_boundary(compose, "openai")
 
 codex_image = compose.get("services", {}).get("codex", {}).get("image")
 expected_codex_image = "ghcr.io/infrasecture/harness-workstation:0.147.0-r2"
@@ -78,6 +107,7 @@ chatgpt = render(
         "MYCODEX_LITELLM_CONFIG": "./auth-profiles/chatgpt/litellm.config.yaml",
     },
 )
+assert_credential_boundary(chatgpt, "chatgpt")
 if codex_label(chatgpt, "agent.vaka.codex.auth-profile") != "chatgpt":
     raise SystemExit("FAIL: chatgpt render did not stamp the chatgpt profile label")
 if not has_mount(chatgpt["services"]["litellm"], "/var/lib/litellm/chatgpt-token"):
@@ -101,6 +131,7 @@ vertex = render(
         "VERTEXAI_PROJECT": "demo-project",
     },
 )
+assert_credential_boundary(vertex, "vertex")
 if not has_mount(vertex["services"]["litellm"], "/etc/vaka/credentials/vertex.json"):
     raise SystemExit("FAIL: vertex overlay does not mount the credential file into litellm")
 vx_env = vertex["services"]["litellm"].get("environment", {})

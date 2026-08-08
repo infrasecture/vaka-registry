@@ -31,6 +31,8 @@ def clean_env(fake_bin: Path, capture: Path) -> dict[str, str]:
         "MYCODEX_VERTEX_CREDENTIALS",
         "OPENAI_API_KEY",
         "OPENAI_API_KEY_FILE",
+        "LITELLM_MASTER_KEY",
+        "LITELLM_MASTER_KEY_FILE",
     ):
         env.pop(name, None)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
@@ -48,6 +50,7 @@ def run_in_pty(
 
     output = bytearray()
     exchange = 0
+    exchange_search_start = 0
     status: int | None = None
     deadline = time.monotonic() + 15
     try:
@@ -62,9 +65,13 @@ def run_in_pty(
                     chunk = b""
                 output.extend(chunk)
 
-            if exchange < len(exchanges) and exchanges[exchange][0] in output:
+            if (
+                exchange < len(exchanges)
+                and exchanges[exchange][0] in output[exchange_search_start:]
+            ):
                 os.write(master, exchanges[exchange][1])
                 exchange += 1
+                exchange_search_start = len(output)
 
             waited, status = os.waitpid(pid, os.WNOHANG)
             if waited == pid:
@@ -100,14 +107,67 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         ": \"${MYCODEX_TEST_CAPTURE:?}\"\n"
-        "printf '%s\\n' \"$@\" > \"${MYCODEX_TEST_CAPTURE}\"\n",
+        "printf '%s\\n' \"$@\" > \"${MYCODEX_TEST_CAPTURE}\"\n"
+        "printf '%s\\n' \"${PWD}\" > \"${MYCODEX_TEST_CAPTURE}.cwd\"\n"
+        "printf '%s\\n' \"${LITELLM_MASTER_KEY-}\" > \"${MYCODEX_TEST_CAPTURE}.gateway-admin\"\n",
         encoding="utf-8",
     )
     launcher.chmod(0o755)
 
     docker = fake_bin / "docker"
-    docker.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "[[ \"${1:-}\" == ps ]] && exit 0\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
     docker.chmod(0o755)
+
+    # Running from the recipe root selects a confined child workspace instead
+    # of mounting the recipe (and its credentials) into the agent container.
+    info_command = [str(recipe / "myCodex"), "info"]
+    code, output = run_in_pty(
+        info_command,
+        recipe,
+        clean_env(fake_bin, capture),
+        [
+            (b"Workspace name [work]:", b"../escape\n"),
+            (b"Workspace name [work]:", b"review-1\n"),
+        ],
+    )
+    if code != 0:
+        fail(f"named recipe workspace selection exited {code}", output)
+    selected_workspace = recipe / ".workspaces" / "review-1"
+    if not selected_workspace.is_dir() or selected_workspace.is_symlink():
+        fail("named recipe workspace was not created as a real directory", output)
+    if Path(f"{capture}.cwd").read_text().strip() != str(selected_workspace):
+        fail("launcher did not run from the selected recipe workspace", output)
+    if (recipe / "escape").exists():
+        fail("invalid workspace name escaped the confined namespace", output)
+    if b"recipe itself will not be mounted" not in output:
+        fail("recipe-directory safety behavior was not explained", output)
+    print("ok: recipe-directory launch prompts for a confined named workspace")
+
+    capture.unlink()
+    Path(f"{capture}.cwd").unlink()
+    result = subprocess.run(
+        info_command,
+        cwd=recipe,
+        env=clean_env(fake_bin, capture),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=False,
+    )
+    default_workspace = recipe / ".workspaces" / "work"
+    if result.returncode != 0:
+        fail("headless recipe workspace selection failed", result.stderr.encode())
+    if Path(f"{capture}.cwd").read_text().strip() != str(default_workspace):
+        fail("headless recipe launch did not use the default workspace")
+    if "no interactive terminal; using default workspace 'work'" not in result.stderr:
+        fail("headless recipe launch did not announce its workspace", result.stderr.encode())
+    print("ok: headless recipe-directory launch uses the announced default workspace")
 
     env = clean_env(fake_bin, capture)
     command = [str(recipe / "myCodex"), "up"]
@@ -147,8 +207,35 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         fail("successful onboarding did not persist the chosen profile", output)
     print("ok: first interactive startup chooses authentication before prompting for a key")
 
-    for managed in ("auth_profile", "openai_api_key"):
-        (recipe / ".secrets" / managed).unlink()
+    # ChatGPT device login runs in a cleanup-scoped subshell. A complete token
+    # makes this deterministic while proving the parent reacquires the managed
+    # LiteLLM administrator key before it launches the requested stack.
+    (recipe / ".secrets" / "auth_profile").unlink()
+    (recipe / ".secrets" / "openai_api_key").unlink()
+    token_dir = recipe / ".secrets" / "chatgpt-token"
+    token_dir.mkdir(mode=0o700)
+    (token_dir / "auth.json").write_text(
+        '{"access_token":"existing-chatgpt-token"}\n', encoding="utf-8"
+    )
+    capture.unlink()
+    (Path(f"{capture}.gateway-admin")).unlink(missing_ok=True)
+    code, output = run_in_pty(
+        command,
+        workspace,
+        clean_env(fake_bin, capture),
+        [(b"Profile [1]:", b"1\n")],
+    )
+    if code != 0:
+        fail(f"ChatGPT first startup exited {code}", output)
+    gateway_key = Path(f"{capture}.gateway-admin").read_text().strip()
+    managed_key = recipe / ".secrets" / "litellm_admin_key_restricted_v1"
+    if not gateway_key or gateway_key != managed_key.read_text().strip():
+        fail("ChatGPT first startup lost the sidecar administrator key after device login", output)
+    if (recipe / ".secrets" / "auth_profile").read_text().strip() != "chatgpt":
+        fail("ChatGPT first startup did not persist its selected profile", output)
+    print("ok: ChatGPT first startup reacquires sidecar credentials after device login")
+
+    (recipe / ".secrets" / "auth_profile").unlink()
     capture.unlink()
 
     result = subprocess.run(

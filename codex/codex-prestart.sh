@@ -70,7 +70,7 @@ awk -v model="${model}" -v legacy_model="${legacy_model}" '
     print "name = \"LiteLLM local proxy\""
     print "base_url = \"http://litellm:4000/v1\""
     print "wire_api = \"responses\""
-    print "env_key = \"OPENAI_API_KEY\""
+    print "env_key = \"MYCODEX_GATEWAY_TOKEN\""
     print "requires_openai_auth = false"
     print "supports_websockets = false"
   }
