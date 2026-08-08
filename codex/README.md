@@ -77,12 +77,21 @@ tokens stored under the recipe's `.secrets/` directory.
 
 ## How To Run It
 
-Run `myCodex` from the project directory you want the agent to work on — **not** from this recipe directory (that would mount the recipe's own `.secrets` into the container).
+Run `myCodex` from the project directory you want the agent to work on:
 
 ```sh
 cd /path/to/your/project
 /path/to/codex/myCodex
 ```
+
+Running `myCodex` from the recipe directory is also safe. The wrapper never
+mounts the recipe root or its `.secrets` into Codex. Instead, it asks for a
+workspace name and creates or reuses `.workspaces/<name>` inside the recipe,
+then launches as though that directory had been the caller's project. The
+default name is `work`; choose another short name to run multiple independent
+sessions in parallel. Each name receives its own Compose project, container,
+and default Codex state volume. Without an interactive terminal, `work` is used
+and announced automatically.
 
 On the first interactive startup, `myCodex` asks how to authenticate before it
 asks for any provider credential. ChatGPT subscription login is the first

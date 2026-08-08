@@ -13,7 +13,7 @@ recipe_bash_is_supported() {
     (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))
 }
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Fail or re-exec before secret prompting. The vendored launcher owns the full
 # diagnostic; this wrapper only handles a valid $SHELL early enough to preserve
@@ -50,6 +50,84 @@ set -euo pipefail
 
 CALLER_DIR="$(pwd -P)"
 
+RECIPE_WORKSPACES_DIR="${SCRIPT_DIR}/.workspaces"
+RECIPE_WORKSPACE_DEFAULT="work"
+
+recipe_workspace_name_is_valid() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$ ]]
+}
+
+recipe_workspace_die() {
+  echo "myCodex: $*" >&2
+  exit 2
+}
+
+select_recipe_workspace() {
+  local workspace_root workspace_root_real workspace_name workspace_path
+  local workspace_path_real created=0
+
+  workspace_root="${RECIPE_WORKSPACES_DIR}"
+  if [[ -L "${workspace_root}" ]]; then
+    recipe_workspace_die "${workspace_root} is a symlink; refusing to use it for agent workspaces"
+  fi
+  if [[ -e "${workspace_root}" && ! -d "${workspace_root}" ]]; then
+    recipe_workspace_die "${workspace_root} exists but is not a directory"
+  fi
+  mkdir -p -- "${workspace_root}" \
+    || recipe_workspace_die "failed to create workspace directory ${workspace_root}"
+  [[ ! -L "${workspace_root}" && -d "${workspace_root}" ]] \
+    || recipe_workspace_die "${workspace_root} did not remain a real directory"
+  workspace_root_real="$(cd -- "${workspace_root}" && pwd -P)" \
+    || recipe_workspace_die "failed to resolve workspace directory ${workspace_root}"
+  [[ "${workspace_root_real}" == "${workspace_root}" ]] \
+    || recipe_workspace_die "${workspace_root} resolves outside the recipe workspace namespace"
+
+  echo "myCodex: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
+  echo "myCodex: each workspace name gets a separate project, container, and Codex state volume." >&2
+  if { : < /dev/tty > /dev/tty; } 2>/dev/null; then
+    while :; do
+      printf 'Workspace name [%s]: ' "${RECIPE_WORKSPACE_DEFAULT}" > /dev/tty
+      IFS= read -r workspace_name < /dev/tty || exit 130
+      [[ -n "${workspace_name}" ]] || workspace_name="${RECIPE_WORKSPACE_DEFAULT}"
+      if recipe_workspace_name_is_valid "${workspace_name}"; then
+        break
+      fi
+      echo "myCodex: use 1-63 lowercase letters, digits, '_' or '-'; start and end with a letter or digit." > /dev/tty
+    done
+  else
+    workspace_name="${RECIPE_WORKSPACE_DEFAULT}"
+    echo "myCodex: no interactive terminal; using default workspace '${workspace_name}'." >&2
+  fi
+
+  workspace_path="${workspace_root}/${workspace_name}"
+  if [[ -L "${workspace_path}" ]]; then
+    recipe_workspace_die "workspace '${workspace_name}' is a symlink; choose another name or remove it"
+  fi
+  if [[ -e "${workspace_path}" && ! -d "${workspace_path}" ]]; then
+    recipe_workspace_die "workspace '${workspace_name}' exists but is not a directory"
+  fi
+  if [[ ! -e "${workspace_path}" ]]; then
+    mkdir -- "${workspace_path}" \
+      || recipe_workspace_die "failed to create workspace ${workspace_path}"
+    created=1
+  fi
+  [[ ! -L "${workspace_path}" && -d "${workspace_path}" ]] \
+    || recipe_workspace_die "workspace '${workspace_name}' did not remain a real directory"
+  workspace_path_real="$(cd -- "${workspace_path}" && pwd -P)" \
+    || recipe_workspace_die "failed to resolve workspace ${workspace_path}"
+  [[ "$(dirname -- "${workspace_path_real}")" == "${workspace_root_real}" ]] \
+    || recipe_workspace_die "workspace '${workspace_name}' resolves outside ${workspace_root}"
+
+  cd -- "${workspace_path_real}" \
+    || recipe_workspace_die "failed to enter workspace ${workspace_path_real}"
+  CALLER_DIR="$(pwd -P)"
+  if (( created )); then
+    echo "myCodex: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+  else
+    echo "myCodex: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+  fi
+}
+
 GATEWAY_AUTH_CONTRACT="restricted-v1"
 GATEWAY_ADMIN_KEY_RESOLVED=0
 GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED=0
@@ -57,12 +135,13 @@ if [[ -n "${LITELLM_MASTER_KEY-}" || -n "${LITELLM_MASTER_KEY_FILE-}" ]]; then
   GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED=1
 fi
 
-# Running from the recipe directory would bind-mount this directory — including
-# .secrets — into the container as the workspace. Refuse it.
+# Never bind-mount the recipe root, which contains managed credentials. A launch
+# from that directory is redirected into a named child of .workspaces instead.
 if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
-  echo "myCodex: running from its own directory exposes secrets inside the container; run it from a project dir." >&2
-  exit 2
+  select_recipe_workspace
 fi
+
+unset -f recipe_workspace_name_is_valid recipe_workspace_die select_recipe_workspace
 
 # Pinned harness image, kept in sync with docker-compose.yaml. Setting these
 # makes the launcher's pre-up image-tag resolution use this value verbatim
