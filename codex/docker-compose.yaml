@@ -6,7 +6,7 @@
 # `docker compose`.
 services:
   codex:
-    image: ghcr.io/infrasecture/harness-workstation:0.147.0-r2
+    image: ${MYCODEX_IMAGE_NAME:-ghcr.io/infrasecture/harness-workstation}:${MYCODEX_IMAGE_TAG:-latest}
     # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
     # vaka never inspects the image to recover them. The entrypoint starts as
     # root and drops to the host user itself via gosu, so the service runs as
@@ -41,7 +41,7 @@ services:
       MYCODEX_CONTAINER_HOME: ${MYCODEX_CONTAINER_HOME:-/home/codex}
       MYCODEX_WORKDIR: ${MYCODEX_WORKDIR:-/workspace}
       CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
-      CODEX_BYOBU_SESSION: codex
+      CODEX_BYOBU_SESSION: ${CODEX_BYOBU_SESSION:-codex}
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
       # Optional user/profile model pin for codex-prestart.sh. Empty profiles let
       # Codex select its current default from its own model catalog.
