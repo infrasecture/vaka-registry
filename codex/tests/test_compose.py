@@ -13,6 +13,9 @@ def render(overlays=None, extra_env=None):
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", "test-provider-key")
     env.setdefault("LITELLM_MASTER_KEY", "test-proxy-key")
+    env["MYCODEX_IMAGE_NAME"] = "registry.invalid/mycodex-contract-test"
+    env["MYCODEX_IMAGE_TAG"] = "9.8.7-r6"
+    env["CODEX_BYOBU_SESSION"] = "recipe-test-session"
     if extra_env:
         env.update(extra_env)
     args = ["docker", "compose", "-f", "docker-compose.yaml"]
@@ -73,11 +76,20 @@ compose = render()
 assert_credential_boundary(compose, "openai")
 
 codex_image = compose.get("services", {}).get("codex", {}).get("image")
-expected_codex_image = "ghcr.io/infrasecture/harness-workstation:0.147.0-r2"
+expected_codex_image = "registry.invalid/mycodex-contract-test:9.8.7-r6"
 if codex_image != expected_codex_image:
     raise SystemExit(
         f"FAIL: codex image is {codex_image!r}, want SemVer reference "
-        f"{expected_codex_image!r} without a digest pin"
+        f"{expected_codex_image!r} supplied by the launcher contract"
+    )
+
+codex_session = compose["services"]["codex"].get("environment", {}).get(
+    "CODEX_BYOBU_SESSION"
+)
+if codex_session != "recipe-test-session":
+    raise SystemExit(
+        f"FAIL: codex session is {codex_session!r}, want launcher-selected "
+        "'recipe-test-session'"
     )
 
 if codex_label(compose, "agent.vaka.codex.auth-profile") != "openai":
