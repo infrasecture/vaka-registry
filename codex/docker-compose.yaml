@@ -6,7 +6,7 @@
 # `docker compose`.
 services:
   codex:
-    image: ${MYCODEX_IMAGE_NAME:-ghcr.io/infrasecture/harness-workstation}:${MYCODEX_IMAGE_TAG:-latest}
+    image: ${MYCODEX_IMAGE_NAME:-invalid.invalid/mycodex-wrapper-required}:${MYCODEX_IMAGE_TAG:-wrapper-required}
     # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
     # vaka never inspects the image to recover them. The entrypoint starts as
     # root and drops to the host user itself via gosu, so the service runs as

@@ -357,6 +357,11 @@ consistently on Linux and VM-backed macOS engines such as Colima. A revision can
 advance workstation content while retaining the same bundled Codex version.
 The LiteLLM image remains digest-pinned.
 
+The Compose file deliberately falls back to an unusable `invalid.invalid`
+image reference when the wrapper-provided image variables are absent. This
+makes an accidental bare `docker compose up` fail closed instead of executing a
+mutable `latest` image. Start the recipe through `myCodex` as documented above.
+
 Treat the project directory as the allowed blast radius. Put only the project files the agent needs there, and keep unrelated secrets outside it.
 
 ## Extending The Setup

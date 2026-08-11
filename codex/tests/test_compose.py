@@ -9,12 +9,16 @@ import subprocess
 recipe_dir = Path(__file__).resolve().parent.parent
 
 
-def render(overlays=None, extra_env=None):
+def render(overlays=None, extra_env=None, image_contract=True):
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", "test-provider-key")
     env.setdefault("LITELLM_MASTER_KEY", "test-proxy-key")
-    env["MYCODEX_IMAGE_NAME"] = "registry.invalid/mycodex-contract-test"
-    env["MYCODEX_IMAGE_TAG"] = "9.8.7-r6"
+    if image_contract:
+        env["MYCODEX_IMAGE_NAME"] = "registry.invalid/mycodex-contract-test"
+        env["MYCODEX_IMAGE_TAG"] = "9.8.7-r6"
+    else:
+        env.pop("MYCODEX_IMAGE_NAME", None)
+        env.pop("MYCODEX_IMAGE_TAG", None)
     env["CODEX_BYOBU_SESSION"] = "recipe-test-session"
     if extra_env:
         env.update(extra_env)
@@ -81,6 +85,17 @@ if codex_image != expected_codex_image:
     raise SystemExit(
         f"FAIL: codex image is {codex_image!r}, want SemVer reference "
         f"{expected_codex_image!r} supplied by the launcher contract"
+    )
+
+unwrapped = render(image_contract=False)
+unwrapped_image = unwrapped["services"]["codex"].get("image")
+expected_unwrapped_image = (
+    "invalid.invalid/mycodex-wrapper-required:wrapper-required"
+)
+if unwrapped_image != expected_unwrapped_image:
+    raise SystemExit(
+        f"FAIL: unwrapped codex image is {unwrapped_image!r}, want fail-closed "
+        f"placeholder {expected_unwrapped_image!r}"
     )
 
 codex_session = compose["services"]["codex"].get("environment", {}).get(
