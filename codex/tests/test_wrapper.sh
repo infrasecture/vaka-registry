@@ -19,6 +19,8 @@ set -euo pipefail
 : "${LITELLM_MASTER_KEY:?}"
 printf '%s\n' "${OPENAI_API_KEY}" > "${MYCODEX_TEST_CAPTURE}.provider"
 printf '%s\n' "${LITELLM_MASTER_KEY}" > "${MYCODEX_TEST_CAPTURE}.proxy"
+printf '%s\n' "${MYCODEX_IMAGE_NAME:?}" > "${MYCODEX_TEST_CAPTURE}.image-name"
+printf '%s\n' "${MYCODEX_IMAGE_TAG:?}" > "${MYCODEX_TEST_CAPTURE}.image-tag"
 STUB
 chmod 755 "${RECIPE}/bin/myCodex"
 
@@ -43,6 +45,11 @@ run_wrapper() {
 capture_one="${TMP}/capture-one"
 capture_two="${TMP}/capture-two"
 run_wrapper "${capture_one}" OPENAI_API_KEY=test-provider-key
+
+[[ -s "${capture_one}.image-name" ]] || fail "wrapper did not select a workstation image name"
+image_tag="$(<"${capture_one}.image-tag")"
+[[ "${image_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r[1-9][0-9]*$ ]] \
+  || fail "wrapper image tag is not a revision-qualified release: ${image_tag}"
 
 secret_dir="${RECIPE}/.secrets"
 secret_file="${secret_dir}/litellm_admin_key_restricted_v1"

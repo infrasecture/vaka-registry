@@ -89,6 +89,7 @@ source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 SERVICE="${CODEX_SERVICE:-codex}"
 SESSION="${CODEX_BYOBU_SESSION:-codex}"
+AUTO_ATTACH="${CODEX_AUTO_ATTACH:-0}"
 WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
 STARTUP_PROGRESS_INTERVAL_SECONDS="${MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS:-2}"
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
@@ -108,7 +109,8 @@ if [[ -z "${PROJECT_NAME}" ]]; then
   PROJECT_NAME="workspace"
 fi
 
-CONTAINER_NAME="${PROJECT_NAME}-codex"
+DEFAULT_CONTAINER_NAME="${PROJECT_NAME}-codex"
+CONTAINER_NAME="${CODEX_CONTAINER_NAME:-${DEFAULT_CONTAINER_NAME}}"
 
 usage() {
   cat <<'EOF'
@@ -134,6 +136,11 @@ die() {
   echo "myCodex: $*" >&2
   exit 2
 }
+
+case "${AUTO_ATTACH}" in
+  0|1) ;;
+  *) die "CODEX_AUTO_ATTACH must be 0 or 1: ${AUTO_ATTACH}" ;;
+esac
 
 yaml_quote() {
   local value="$1"
@@ -325,9 +332,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-STATE_VOLUME_NAME="codex_state"
+STATE_VOLUME_NAME="${MYCODEX_STATE_VOLUME_NAME:-codex_state}"
+STATE_VOLUME_KIND="shared"
+if [[ -n "${MYCODEX_STATE_VOLUME_NAME:-}" ]]; then
+  STATE_VOLUME_KIND="custom"
+fi
 if [[ "${PRIVATE_ENV}" == "1" ]]; then
   STATE_VOLUME_NAME="${PROJECT_NAME}_codex_state"
+  STATE_VOLUME_KIND="per-project"
+fi
+
+if [[ "${CONTAINER_NAME}" != "${DEFAULT_CONTAINER_NAME}" ]] \
+  || [[ "${STATE_VOLUME_NAME}" != "codex_state" ]] \
+  || [[ "${SESSION}" != "codex" ]] \
+  || [[ "${AUTO_ATTACH}" != 0 ]]; then
+  RUNTIME_CONFIG_CHANGED=1
 fi
 
 ensure_state_volume() {
@@ -485,6 +504,8 @@ run_docker_compose() {
   env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    CODEX_BYOBU_SESSION="${SESSION}" \
+    CODEX_AUTO_ATTACH="${AUTO_ATTACH}" \
     MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
     MYCODEX_LAUNCHED_BY_WRAPPER=1 \
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
@@ -726,16 +747,24 @@ print_info() {
   printf 'myCodex configuration\n'
   printf '  project name      %s\n' "${PROJECT_NAME}"
   printf '  container name    %s\n' "${CONTAINER_NAME}"
+  printf '  tmux session      %s\n' "${SESSION}"
+  printf '  auto attach       %s\n' "${AUTO_ATTACH}"
   printf '  image             %s\n' "${image_ref}"
   printf '  workspace (host)  %s\n' "${CALLER_DIR}"
   printf '  workdir (in ctr)  %s\n' "${CONTAINER_WORKDIR}"
   printf '  home (in ctr)     %s\n' "${CONTAINER_HOME}"
   printf '  host identity     %s:%s (%s:%s)\n' "${HOST_UID}" "${HOST_GID}" "${HOST_USER}" "${HOST_GROUP}"
-  if [[ "${PRIVATE_ENV:-0}" == "1" ]]; then
-    printf '  state volume      %s [%s] (per-project, --private-env)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
-  else
-    printf '  state volume      %s [%s] (shared)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
-  fi
+  case "${STATE_VOLUME_KIND}" in
+    per-project)
+      printf '  state volume      %s [%s] (per-project, --private-env)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
+      ;;
+    custom)
+      printf '  state volume      %s [%s] (custom, MYCODEX_STATE_VOLUME_NAME)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
+      ;;
+    *)
+      printf '  state volume      %s [%s] (shared)\n' "${STATE_VOLUME_NAME}" "${vol_state}"
+      ;;
+  esac
   if [[ "${vol_state}" == "exists" ]]; then
     printf '  volume created    %s\n' "${vol_created}"
     printf '  volume mountpoint %s\n' "${vol_mount}"

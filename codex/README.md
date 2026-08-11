@@ -277,8 +277,8 @@ default from the catalog bundled with the workstation image, and a model chosen
 inside Codex remains the user's choice. Set `MYCODEX_MODEL` only when an
 explicit per-invocation pin is wanted.
 
-The profile routes the complete model set exposed by Codex `0.146.0` for this
-backend:
+The profile routes the complete model set exposed by the Codex release bundled
+in the selected workstation image for this backend:
 
 | Model | Codex reasoning choices |
 | --- | --- |
@@ -349,12 +349,18 @@ It does not solve:
 - Trust decisions about code the agent writes for you.
 - All possible Docker, host, or kernel escape risks.
 
-The Codex workstation image uses the bundled Codex version tag (currently
-`0.146.0`) instead of a manifest-list digest. This lets Docker select the
-native platform image consistently on Linux and VM-backed macOS engines such
-as Colima. The tag can advance to a newer workstation image revision that
-still bundles the same Codex version; it does not track a different Codex
-version. The LiteLLM image remains digest-pinned.
+The recipe wrapper selects the Codex workstation image with a
+`<codex-version>-r<image-revision>` tag instead of a manifest-list digest. The
+concrete tag is defined once by the wrapper and forwarded through the vendored
+launcher to Compose. This lets Docker select the native platform image
+consistently on Linux and VM-backed macOS engines such as Colima. A revision can
+advance workstation content while retaining the same bundled Codex version.
+The LiteLLM image remains digest-pinned.
+
+The Compose file deliberately falls back to an unusable `invalid.invalid`
+image reference when the wrapper-provided image variables are absent. This
+makes an accidental bare `docker compose up` fail closed instead of executing a
+mutable `latest` image. Start the recipe through `myCodex` as documented above.
 
 Treat the project directory as the allowed blast radius. Put only the project files the agent needs there, and keep unrelated secrets outside it.
 

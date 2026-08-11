@@ -143,12 +143,11 @@ fi
 
 unset -f recipe_workspace_name_is_valid recipe_workspace_die select_recipe_workspace
 
-# Pinned harness image, kept in sync with docker-compose.yaml. Setting these
-# makes the launcher's pre-up image-tag resolution use this value verbatim
-# instead of probing the registry; the compose file pins by digest, so the tag
-# is only informational.
+# Released workstation image used by this recipe. This wrapper is the sole
+# concrete version source; the vendored launcher forwards both values to
+# docker-compose.yaml and skips automatic registry discovery.
 export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
-export MYCODEX_IMAGE_TAG="0.146.0"
+export MYCODEX_IMAGE_TAG="0.147.0-r2"
 
 read_secret_value() {
   local env_name="$1"
