@@ -1,0 +1,108 @@
+# Recipe compose, driven by the vendored upstream launcher (bin/myCodex) through
+# vaka. The launcher sets MYCODEX_WORKDIR to the caller's directory and
+# MYCODEX_CONTAINER_HOME to the host $HOME, so the workspace is mounted at its
+# own host path (path parity) and files stay owned by the invoking user — none
+# of these paths are hardcoded here. Run the stack via ./myCodex, never bare
+# `docker compose`.
+services:
+  codex:
+    image: ${MYCODEX_IMAGE_NAME:-invalid.invalid/mycodex-wrapper-required}:${MYCODEX_IMAGE_TAG:-wrapper-required}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Declared to match the image's baked defaults (ENTRYPOINT + root USER) so
+    # vaka never inspects the image to recover them. The entrypoint starts as
+    # root and drops to the host user itself via gosu, so the service runs as
+    # root here.
+    user: "0:0"
+    # Vaka temporarily adds NET_ADMIN so vaka-init can install policy. It then
+    # removes that capability from the original process tree before starting
+    # this service. The explicit drop also keeps bare-Compose behavior honest.
+    cap_drop:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
+    init: true
+    tty: true
+    stdin_open: true
+    working_dir: ${MYCODEX_WORKDIR:-/workspace}
+    # Records which auth profile created this container so ./myCodex can refuse a
+    # profile switch via start/restart (which do not recreate containers) instead
+    # of silently running one profile's config under another's egress policy.
+    labels:
+      agent.vaka.codex.auth-profile: ${MYCODEX_AUTH:-openai}
+      agent.vaka.codex.gateway-auth: restricted-v1
+    depends_on:
+      litellm:
+        condition: service_started
+
+    environment:
+      # Host identity, supplied by the launcher, so the container runs as *you*
+      # (via gosu): files the agent creates under the mounted workspace stay
+      # owned by your host user. The image entrypoint refuses to start if these
+      # are unset — run the stack through ./myCodex, not bare `docker compose`.
+      MYCODEX_HOST_UID: ${MYCODEX_HOST_UID:-}
+      MYCODEX_HOST_GID: ${MYCODEX_HOST_GID:-}
+      MYCODEX_HOST_USER: ${MYCODEX_HOST_USER:-}
+      MYCODEX_HOST_GROUP: ${MYCODEX_HOST_GROUP:-}
+      MYCODEX_HOST_GROUPS: ${MYCODEX_HOST_GROUPS:-}
+      MYCODEX_CONTAINER_HOME: ${MYCODEX_CONTAINER_HOME:-/home/codex}
+      MYCODEX_WORKDIR: ${MYCODEX_WORKDIR:-/workspace}
+      CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
+      CODEX_ACP_SOCKET: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}/run/codex-acp.sock
+      # Authentication is completed by myCodex before the ACP client connects;
+      # the container is deliberately unable to perform a second browser flow.
+      NO_BROWSER: "1"
+      CODEX_BYOBU_SESSION: ${CODEX_BYOBU_SESSION:-codex}
+      MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
+      # Optional user/profile model pin for codex-prestart.sh. Empty profiles let
+      # Codex select its current default from its own model catalog.
+      MYCODEX_MODEL: ${MYCODEX_MODEL:-}
+      # One-time migration hint for a model pin written by an older recipe.
+      # prestart removes only an exact generated line and preserves user choices.
+      MYCODEX_LEGACY_MODEL: ${MYCODEX_LEGACY_MODEL:-}
+      # Fixed, non-secret client marker. LiteLLM restricts it to the exact
+      # inference routes in litellm_agent_auth.py; no provider or gateway
+      # administrator credential enters the Codex container.
+      MYCODEX_GATEWAY_TOKEN: mycodex-agent-v1
+    # Inject the LiteLLM provider, then run the ACP broker as the original
+    # Vaka-initialized service process. Every adapter it spawns inherits that
+    # process tree's capability bounding set, where NET_ADMIN is absent.
+    command: ["bash", "/usr/local/bin/codex-prestart.sh"]
+
+    volumes:
+      - ${WORKSPACE_DIR:-./}:${MYCODEX_WORKDIR:-/workspace}
+      - codex_state:${MYCODEX_CONTAINER_HOME:-/home/codex}
+      - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e
+    init: true
+    labels:
+      agent.vaka.codex.gateway-auth: restricted-v1
+    command: ["--config", "/app/config.yaml", "--telemetry", "False", "--debug"]
+    environment:
+      LITELLM_MASTER_KEY:
+      OPENAI_API_KEY:
+      MYCODEX_GATEWAY_TOKEN: mycodex-agent-v1
+      DISABLE_ADMIN_UI: "True"
+      NO_DOCS: "True"
+      NO_REDOC: "True"
+      LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
+      OTEL_SDK_DISABLED: "true"
+    volumes:
+      # Default resolves to the openai config; auth profiles point this at their
+      # own provider config via MYCODEX_LITELLM_CONFIG (set by ./myCodex).
+      - ${MYCODEX_LITELLM_CONFIG:-./litellm.config.yaml}:/app/config.yaml:ro
+      - ./litellm_agent_auth.py:/app/litellm_agent_auth.py:ro
+    expose:
+      - "4000"
+
+volumes:
+  # Managed by the launcher (created via `docker volume create`); `--private-env`
+  # scopes it per project by setting MYCODEX_STATE_VOLUME_NAME.
+  codex_state:
+    name: ${MYCODEX_STATE_VOLUME_NAME:-codex_state}
+    external: true

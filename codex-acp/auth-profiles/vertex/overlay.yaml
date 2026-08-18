@@ -1,0 +1,12 @@
+# Compose overlay for the Vertex AI profile (SCAFFOLD). Additive over
+# docker-compose.yaml: binds the host credential file (resolved by ./myCodex to
+# MYCODEX_CREDENTIAL_FILE) read-only into the sidecar and points Google's client
+# libraries at it. Project/location pass through from the environment.
+services:
+  litellm:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /etc/vaka/credentials/vertex.json
+      VERTEXAI_PROJECT: ${VERTEXAI_PROJECT:-}
+      VERTEXAI_LOCATION: ${VERTEXAI_LOCATION:-us-central1}
+    volumes:
+      - ${MYCODEX_CREDENTIAL_FILE:-/dev/null}:/etc/vaka/credentials/vertex.json:ro

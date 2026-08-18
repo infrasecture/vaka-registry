@@ -25,6 +25,7 @@ up` inside a recipe directory.
 | Recipe | Description |
 |--------|-------------|
 | [codex](codex/) | Codex agent in an egress-restricted container with a LiteLLM gateway sidecar |
+| [codex-acp](codex-acp/) | Codex over ACP stdio, with per-workspace isolation and an egress-restricted original process tree |
 
 ## Authoring
 

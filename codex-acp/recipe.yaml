@@ -1,0 +1,18 @@
+apiVersion: recipes.vaka/v1alpha1
+kind: Recipe
+name: codex-acp
+version: 0.1.0
+description: Codex ACP agent over stdio with per-workspace isolation and restricted egress
+homepage: https://github.com/infrasecture/vaka-registry/tree/main/codex-acp
+tags: [agent, acp, openai, codex, litellm, chatgpt]
+minVakaVersion: 0.0.3
+env:
+  - name: MYCODEX_AUTH
+    required: false
+    description: "One-invocation auth-profile override for automation; interactive first startup or myCodex login selects and persists chatgpt, openai, or vertex"
+  - name: OPENAI_API_KEY
+    required: false
+    description: Model provider API key consumed only by LiteLLM in the openai profile; myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile is selected
+  - name: MYCODEX_MODEL
+    required: false
+    description: Optional explicit model pin passed to Codex ACP; the OpenAI and ChatGPT profiles otherwise leave selection to Codex, while experimental profiles may define their own default
