@@ -48,6 +48,18 @@ already-started broker. It never builds containers, changes authentication, or
 launches a browser; missing setup is reported on stderr with an instruction to
 run the launcher interactively first.
 
+Normally the ACP client's current directory is the workspace, so no workspace
+argument is needed. If the client runs from the recipe directory, select an
+existing managed workspace explicitly; **stdio** never prompts or creates it:
+
+~~~json
+{
+  "command": "/absolute/path/to/codex-acp/myCodexACP",
+  "args": ["--workspace", "work", "stdio"],
+  "cwd": "/absolute/path/to/codex-acp"
+}
+~~~
+
 If the launcher is run from the recipe directory itself, it safely selects or
 creates a child under **.workspaces/** instead of exposing the recipe, managed
 credentials, or build files to the agent. With no terminal it uses the announced
@@ -83,6 +95,10 @@ Additional mounts and Compose overrides use the inherited launcher options:
 ./myCodexACP -v /host/data:/data:ro start
 ./myCodexACP -f ./local-policy-overlay.yaml start
 ~~~
+
+From the recipe directory, **--workspace &lt;name&gt;** selects the matching
+**.workspaces/&lt;name&gt;** child without a prompt. Interactive startup may create
+that child; **stdio** requires it to exist already.
 
 Use the same options before **status**, **stdio**, **stop**, or **down** when an
 override changes how the Compose project is resolved. Only **start** applies

@@ -1,7 +1,7 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: Recipe
 name: codex-acp
-version: 0.3.0
+version: 0.3.1
 description: Codex ACP agent over stdio with per-workspace isolation and restricted egress
 homepage: https://github.com/infrasecture/vaka-registry/tree/main/codex-acp
 tags: [agent, acp, openai, codex, litellm, chatgpt]

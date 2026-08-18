@@ -62,6 +62,9 @@ recipe_workspace_die() {
 }
 
 select_recipe_workspace() {
+  local requested_name="${1:-}"
+  local allow_create="${2:-1}"
+  local announce="${3:-1}"
   local workspace_root workspace_root_real workspace_name workspace_path
   local workspace_path_real created=0
 
@@ -72,8 +75,13 @@ select_recipe_workspace() {
   if [[ -e "${workspace_root}" && ! -d "${workspace_root}" ]]; then
     recipe_workspace_die "${workspace_root} exists but is not a directory"
   fi
-  mkdir -p -- "${workspace_root}" \
-    || recipe_workspace_die "failed to create workspace directory ${workspace_root}"
+  if [[ ! -e "${workspace_root}" ]]; then
+    if [[ "${allow_create}" != "1" ]]; then
+      recipe_workspace_die "workspace '${requested_name}' does not exist; run './myCodexACP --workspace ${requested_name}' interactively first"
+    fi
+    mkdir -p -- "${workspace_root}" \
+      || recipe_workspace_die "failed to create workspace directory ${workspace_root}"
+  fi
   [[ ! -L "${workspace_root}" && -d "${workspace_root}" ]] \
     || recipe_workspace_die "${workspace_root} did not remain a real directory"
   workspace_root_real="$(cd -- "${workspace_root}" && pwd -P)" \
@@ -81,9 +89,15 @@ select_recipe_workspace() {
   [[ "${workspace_root_real}" == "${workspace_root}" ]] \
     || recipe_workspace_die "${workspace_root} resolves outside the recipe workspace namespace"
 
-  echo "myCodexACP: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
-  echo "myCodexACP: each workspace name gets a separate project, container, and Codex state volume." >&2
-  if { : < /dev/tty > /dev/tty; } 2>/dev/null; then
+  if [[ "${announce}" == "1" ]]; then
+    echo "myCodexACP: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
+    echo "myCodexACP: each workspace name gets a separate project, container, and Codex state volume." >&2
+  fi
+  if [[ -n "${requested_name}" ]]; then
+    recipe_workspace_name_is_valid "${requested_name}" \
+      || recipe_workspace_die "invalid workspace '${requested_name}'; use 1-63 lowercase letters, digits, '_' or '-'"
+    workspace_name="${requested_name}"
+  elif { : < /dev/tty > /dev/tty; } 2>/dev/null; then
     while :; do
       printf 'Workspace name [%s]: ' "${RECIPE_WORKSPACE_DEFAULT}" > /dev/tty
       IFS= read -r workspace_name < /dev/tty || exit 130
@@ -106,6 +120,9 @@ select_recipe_workspace() {
     recipe_workspace_die "workspace '${workspace_name}' exists but is not a directory"
   fi
   if [[ ! -e "${workspace_path}" ]]; then
+    if [[ "${allow_create}" != "1" ]]; then
+      recipe_workspace_die "workspace '${workspace_name}' does not exist; run './myCodexACP --workspace ${workspace_name}' interactively first"
+    fi
     mkdir -- "${workspace_path}" \
       || recipe_workspace_die "failed to create workspace ${workspace_path}"
     created=1
@@ -120,12 +137,82 @@ select_recipe_workspace() {
   cd -- "${workspace_path_real}" \
     || recipe_workspace_die "failed to enter workspace ${workspace_path_real}"
   CALLER_DIR="$(pwd -P)"
-  if (( created )); then
-    echo "myCodexACP: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
-  else
-    echo "myCodexACP: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+  if [[ "${announce}" == "1" ]]; then
+    if (( created )); then
+      echo "myCodexACP: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+    else
+      echo "myCodexACP: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+    fi
   fi
 }
+
+RECIPE_WORKSPACE_OPTION=""
+RECIPE_COMMAND=""
+RECIPE_FILTERED_ARGS=()
+
+extract_recipe_workspace_option() {
+  local arg command_seen=0 index=0
+  local -a args=("$@")
+
+  while (( index < ${#args[@]} )); do
+    arg="${args[index]}"
+    if (( command_seen )); then
+      RECIPE_FILTERED_ARGS+=("${arg}")
+      ((index += 1))
+      continue
+    fi
+
+    case "${arg}" in
+      --workspace)
+        (( index + 1 < ${#args[@]} )) \
+          || recipe_workspace_die "--workspace requires a workspace name"
+        [[ -z "${RECIPE_WORKSPACE_OPTION}" ]] \
+          || recipe_workspace_die "--workspace may be specified only once"
+        RECIPE_WORKSPACE_OPTION="${args[index + 1]}"
+        [[ -n "${RECIPE_WORKSPACE_OPTION}" ]] \
+          || recipe_workspace_die "--workspace requires a workspace name"
+        ((index += 2))
+        ;;
+      --workspace=*)
+        [[ -z "${RECIPE_WORKSPACE_OPTION}" ]] \
+          || recipe_workspace_die "--workspace may be specified only once"
+        RECIPE_WORKSPACE_OPTION="${arg#--workspace=}"
+        [[ -n "${RECIPE_WORKSPACE_OPTION}" ]] \
+          || recipe_workspace_die "--workspace requires a workspace name"
+        ((index += 1))
+        ;;
+      --auth|-v|--volume|-f|--compose-file)
+        RECIPE_FILTERED_ARGS+=("${arg}")
+        ((index += 1))
+        if (( index < ${#args[@]} )); then
+          RECIPE_FILTERED_ARGS+=("${args[index]}")
+          ((index += 1))
+        fi
+        ;;
+      --auth=*|--volume=*|--compose-file=*|--private-env)
+        RECIPE_FILTERED_ARGS+=("${arg}")
+        ((index += 1))
+        ;;
+      --)
+        RECIPE_FILTERED_ARGS+=("${arg}")
+        ((index += 1))
+        if (( index < ${#args[@]} )); then
+          RECIPE_COMMAND="${args[index]}"
+          command_seen=1
+        fi
+        ;;
+      *)
+        RECIPE_COMMAND="${arg}"
+        command_seen=1
+        RECIPE_FILTERED_ARGS+=("${arg}")
+        ((index += 1))
+        ;;
+    esac
+  done
+}
+
+extract_recipe_workspace_option "$@"
+set -- "${RECIPE_FILTERED_ARGS[@]}"
 
 GATEWAY_AUTH_CONTRACT="restricted-v1"
 GATEWAY_ADMIN_KEY_RESOLVED=0
@@ -176,14 +263,27 @@ recipe_command_needs_workspace() {
   esac
 }
 
-# Never bind-mount the recipe root, which contains managed credentials. A
-# workspace command from that directory is redirected into a confined child.
-if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]] && recipe_command_needs_workspace "$@"; then
-  select_recipe_workspace
+# Never bind-mount the recipe root, which contains managed credentials. Human
+# commands may select/create a confined child. stdio must resolve one without
+# prompting or creating state because its stdin is exclusively ACP traffic.
+if recipe_command_needs_workspace "$@"; then
+  if [[ -n "${RECIPE_WORKSPACE_OPTION}" ]]; then
+    if [[ "${RECIPE_COMMAND}" == "stdio" ]]; then
+      select_recipe_workspace "${RECIPE_WORKSPACE_OPTION}" 0 0
+    else
+      select_recipe_workspace "${RECIPE_WORKSPACE_OPTION}" 1 1
+    fi
+  elif [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
+    if [[ "${RECIPE_COMMAND}" == "stdio" ]]; then
+      recipe_workspace_die "stdio is noninteractive; use '--workspace <name>' when invoked from the recipe directory"
+    fi
+    select_recipe_workspace
+  fi
 fi
 
-unset -f recipe_command_needs_workspace recipe_workspace_name_is_valid \
-  recipe_workspace_die select_recipe_workspace
+unset -f extract_recipe_workspace_option recipe_command_needs_workspace \
+  recipe_workspace_name_is_valid recipe_workspace_die select_recipe_workspace
+unset RECIPE_COMMAND RECIPE_FILTERED_ARGS RECIPE_WORKSPACE_OPTION
 
 # Local derived image used by this recipe. Compose builds it from the distributed
 # Dockerfile; the exact tag prevents the vendored launcher's registry discovery.

@@ -35,6 +35,8 @@ done
 explicit_help="$(cd "${RECIPE}" && ./myCodexACP help)"
 grep -Fq 'Additional authentication commands:' <<<"${explicit_help}" \
   || fail "explicit help omitted the additional authentication commands"
+grep -Fq -- '--workspace <name>' <<<"${explicit_help}" \
+  || fail "explicit help omitted managed workspace selection"
 [[ ! -e "${RECIPE}/.workspaces" ]] \
   || fail "explicit help created a workspace"
 [[ ! -e "${RECIPE}/.secrets" ]] \

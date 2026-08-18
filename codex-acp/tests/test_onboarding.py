@@ -186,6 +186,67 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         fail("headless recipe launch did not announce its workspace", result.stderr.encode())
     print("ok: headless recipe-directory launch uses the announced default workspace")
 
+    # ACP stdin must never enter workspace selection. From the recipe root the
+    # workspace is mandatory, resolved without prompting, and must pre-exist.
+    capture.unlink()
+    Path(f"{capture}.cwd").unlink()
+    result = subprocess.run(
+        [str(recipe / "myCodexACP"), "stdio"],
+        cwd=recipe,
+        env=clean_env(fake_bin, capture),
+        input='{"jsonrpc":"2.0"}\n',
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        fail("recipe-root stdio accepted a missing workspace")
+    if result.stdout:
+        fail("recipe-root stdio polluted ACP stdout", result.stdout.encode())
+    if "stdio is noninteractive" not in result.stderr or "--workspace <name>" not in result.stderr:
+        fail("recipe-root stdio workspace error was not actionable", result.stderr.encode())
+    if capture.exists():
+        fail("recipe-root stdio reached the launcher without a workspace")
+
+    result = subprocess.run(
+        [str(recipe / "myCodexACP"), "--workspace", "review-1", "stdio"],
+        cwd=recipe,
+        env=clean_env(fake_bin, capture),
+        input='{"jsonrpc":"2.0"}\n',
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail("explicit stdio workspace failed", result.stderr.encode())
+    if Path(f"{capture}.cwd").read_text().strip() != str(selected_workspace):
+        fail("explicit stdio workspace did not select the requested directory")
+    if capture.read_text().splitlines()[-1] != "stdio":
+        fail("explicit stdio workspace did not reach the ACP command")
+    if "Workspace name" in result.stderr or "invoked from the recipe directory" in result.stderr:
+        fail("explicit stdio workspace produced interactive selection output", result.stderr.encode())
+
+    capture.unlink()
+    Path(f"{capture}.cwd").unlink()
+    missing_workspace = recipe / ".workspaces" / "missing"
+    result = subprocess.run(
+        [str(recipe / "myCodexACP"), "--workspace=missing", "stdio"],
+        cwd=recipe,
+        env=clean_env(fake_bin, capture),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=False,
+    )
+    if result.returncode == 0 or missing_workspace.exists():
+        fail("stdio created or accepted a missing explicit workspace")
+    if result.stdout:
+        fail("missing explicit workspace polluted ACP stdout", result.stdout.encode())
+    print("ok: stdio requires and noninteractively resolves recipe-root workspaces")
+
     env = clean_env(fake_bin, capture)
     # No subcommand is the normal human flow, matching the sibling myCodex
     # recipe: choose a profile, authenticate, and start the workspace.

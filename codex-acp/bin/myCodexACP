@@ -131,6 +131,7 @@ Advanced:
   myCodexACP [options] <compose-cmd>  Pass through to Vaka Compose
 
 Options:
+  --workspace <name>                  Select a managed recipe workspace
   --private-env                      Use a per-project Codex state volume
   -v, --volume <spec>                Add an extra Docker-style volume mount
   -f, --compose-file <path>          Add an extra Compose override file
