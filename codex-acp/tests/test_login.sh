@@ -184,6 +184,61 @@ run_login() {
   )
 }
 
+run_headless_command() {
+  (
+    cd "${WORKSPACE}"
+    env \
+      PATH="${FAKE_BIN}:${PATH}" \
+      MYCODEX_AUTH=chatgpt \
+      MYCODEX_CHATGPT_READY_TIMEOUT=5 \
+      MYCODEX_CHATGPT_LOGIN_TIMEOUT=30 \
+      MYCODEX_TEST_MODE=wait \
+      MYCODEX_TEST_TOKEN_FILE="${TOKEN_FILE}" \
+      MYCODEX_TEST_REQUESTS="${REQUESTS}" \
+      MYCODEX_TEST_MODELS="${MODELS}" \
+      MYCODEX_TEST_LAUNCHER_CALLS="${LAUNCHER_CALLS}" \
+      MYCODEX_TEST_LOG_CLEANED="${LOG_CLEANED}" \
+      MYCODEX_TEST_PROBE_CLEANED="${PROBE_CLEANED}" \
+      MYCODEX_TEST_SERVICE_EXISTS="${SERVICE_EXISTS}" \
+      MYCODEX_TEST_SERVICE_STOPPED="${SERVICE_STOPPED}" \
+      MYCODEX_TEST_SERVICE_PAUSED="${SERVICE_PAUSED}" \
+      MYCODEX_TEST_CONTAINER_ID="${CONTAINER_ID}" \
+      MYCODEX_TEST_PRIOR_STATE=absent \
+      "${RECIPE}/myCodexACP" "$@"
+  )
+}
+
+run_interactive_default() {
+  (
+    cd "${WORKSPACE}"
+    env \
+      PATH="${FAKE_BIN}:${PATH}" \
+      MYCODEX_AUTH=chatgpt \
+      MYCODEX_CHATGPT_READY_TIMEOUT=5 \
+      MYCODEX_CHATGPT_LOGIN_TIMEOUT=30 \
+      MYCODEX_TEST_MODE=success \
+      MYCODEX_TEST_TOKEN_FILE="${TOKEN_FILE}" \
+      MYCODEX_TEST_REQUESTS="${REQUESTS}" \
+      MYCODEX_TEST_MODELS="${MODELS}" \
+      MYCODEX_TEST_LAUNCHER_CALLS="${LAUNCHER_CALLS}" \
+      MYCODEX_TEST_LOG_CLEANED="${LOG_CLEANED}" \
+      MYCODEX_TEST_PROBE_CLEANED="${PROBE_CLEANED}" \
+      MYCODEX_TEST_SERVICE_EXISTS="${SERVICE_EXISTS}" \
+      MYCODEX_TEST_SERVICE_STOPPED="${SERVICE_STOPPED}" \
+      MYCODEX_TEST_SERVICE_PAUSED="${SERVICE_PAUSED}" \
+      MYCODEX_TEST_CONTAINER_ID="${CONTAINER_ID}" \
+      MYCODEX_TEST_PRIOR_STATE=absent \
+      python3 - "${RECIPE}/myCodexACP" <<'PY'
+import os
+import pty
+import sys
+
+status = pty.spawn([sys.argv[1]])
+raise SystemExit(os.waitstatus_to_exitcode(status))
+PY
+  )
+}
+
 request_count() {
   [[ -f "${REQUESTS}" ]] || { printf '0'; return; }
   wc -l < "${REQUESTS}" | tr -d ' '
@@ -227,6 +282,50 @@ grep -Fq 'discarded incomplete ChatGPT login state' <<< "${output}" \
 grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"test-token"' "${TOKEN_FILE}" \
   || fail "login retry did not replace incomplete state with a complete token"
 echo "ok: login retry discards incomplete device-flow state before startup"
+
+# A headless startup or ACP connection cannot strand a device code in service
+# logs and then claim readiness. Authentication must be completed explicitly.
+reset_case
+mkdir -p -- "$(dirname -- "${TOKEN_FILE}")"
+printf '{"device_code_requested_at":"incomplete"}\n' > "${TOKEN_FILE}"
+if output="$(run_headless_command 2>&1)"; then
+  fail "headless default startup accepted incomplete ChatGPT authentication"
+fi
+grep -Fq 'authentication for profile '\''chatgpt'\'' is incomplete' <<< "${output}" \
+  || fail "headless startup did not explain incomplete authentication"
+grep -Fq 'myCodexACP login chatgpt' <<< "${output}" \
+  || fail "headless startup did not provide the foreground login command"
+[[ ! -e "${LAUNCHER_CALLS}" ]] \
+  || fail "headless startup reached the stack before authentication completed"
+
+if output="$(run_headless_command stdio 2>&1)"; then
+  fail "stdio accepted incomplete ChatGPT authentication"
+fi
+grep -Fq 'before connecting an ACP client' <<< "${output}" \
+  || fail "stdio did not reject incomplete authentication clearly"
+[[ ! -e "${LAUNCHER_CALLS}" ]] \
+  || fail "stdio reached the ACP relay with incomplete authentication"
+echo "ok: default startup and stdio fail closed on incomplete headless authentication"
+
+# In a terminal, the same incomplete state must enter the foreground device
+# flow automatically and launch the workspace only after the token is complete.
+reset_case
+mkdir -p -- "$(dirname -- "${TOKEN_FILE}")"
+printf '{"device_code_requested_at":"incomplete"}\n' > "${TOKEN_FILE}"
+output="$(run_interactive_default 2>&1)" \
+  || fail "interactive default startup did not complete device login: ${output}"
+grep -Fq 'Enter code: TEST-CODE' <<< "${output}" \
+  || fail "interactive default startup hid the ChatGPT device code"
+grep -Fq 'ChatGPT login complete' <<< "${output}" \
+  || fail "interactive default startup did not wait for authentication"
+grep -Eq '"access_token"[[:space:]]*:[[:space:]]*"test-token"' "${TOKEN_FILE}" \
+  || fail "interactive default startup launched without a complete token"
+[[ "$(request_count)" == "1" ]] \
+  || fail "interactive default startup requested more than one device code"
+last_launcher_call="$(tail -n 1 "${LAUNCHER_CALLS}")"
+[[ "${last_launcher_call}" == --private-env\ -f\ */auth-profiles/chatgpt/overlay.yaml ]] \
+  || fail "interactive default startup did not continue to workspace startup"
+echo "ok: interactive default startup completes ChatGPT login before launching"
 
 # A provider/configuration failure is terminal. It must not mint repeated codes
 # or remain hidden until the human authorization deadline.

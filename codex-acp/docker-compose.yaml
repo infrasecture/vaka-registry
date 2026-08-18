@@ -23,7 +23,7 @@ services:
     security_opt:
       - no-new-privileges:true
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
-    container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
+    container_name: ${CODEX_CONTAINER_NAME:-codex-acp-dev}
     init: true
     tty: true
     stdin_open: true

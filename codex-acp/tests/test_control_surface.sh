@@ -22,15 +22,15 @@ rm -rf -- "${RECIPE}/.secrets" "${RECIPE}/.workspaces"
 [[ ! -e "${RECIPE}/myCodex" && ! -e "${RECIPE}/bin/myCodex" ]] \
   || fail "the obsolete myCodex command is still distributed"
 
-help_output="$(cd "${RECIPE}" && ./myCodexACP)"
+help_output="$(cd "${RECIPE}" && ./myCodexACP help)"
 for command in start login status stdio stop down; do
   grep -Eq "^[[:space:]]+myCodexACP .*${command}" <<<"${help_output}" \
-    || fail "no-command help does not advertise '${command}'"
+    || fail "help does not advertise '${command}'"
 done
 [[ ! -e "${RECIPE}/.workspaces" ]] \
-  || fail "no-command help created a workspace"
+  || fail "help created a workspace"
 [[ ! -e "${RECIPE}/.secrets" ]] \
-  || fail "no-command help created credential state"
+  || fail "help created credential state"
 
 explicit_help="$(cd "${RECIPE}" && ./myCodexACP help)"
 grep -Fq 'Additional authentication commands:' <<<"${explicit_help}" \
@@ -40,4 +40,4 @@ grep -Fq 'Additional authentication commands:' <<<"${explicit_help}" \
 [[ ! -e "${RECIPE}/.secrets" ]] \
   || fail "explicit help created credential state"
 
-echo "PASS: myCodexACP exposes the six-command lifecycle without setup side effects"
+echo "PASS: explicit help exposes lifecycle commands without setup side effects"

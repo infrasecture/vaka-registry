@@ -167,7 +167,7 @@ recipe_command_needs_workspace() {
   done
 
   case "${command}" in
-    ""|login|logout|auth|help|-h|--help)
+    login|logout|auth|help|-h|--help)
       return 1
       ;;
     *)
@@ -189,12 +189,6 @@ unset -f recipe_command_needs_workspace recipe_workspace_name_is_valid \
 # Dockerfile; the exact tag prevents the vendored launcher's registry discovery.
 export MYCODEX_IMAGE_NAME="vaka/codex-acp"
 export MYCODEX_IMAGE_TAG="1.3.0-r1"
-
-# No command is pure help. Keep it independent of Docker, Vaka, profile state,
-# workspace selection, and credential handling.
-if [[ $# -eq 0 ]]; then
-  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP"
-fi
 
 read_secret_value() {
   local env_name="$1"
@@ -453,7 +447,7 @@ AUTH_SELECTION_SOURCE=""
 # Keep this in sync with bin/myCodexACP's PROJECT_NAME/CONTAINER_NAME derivation.
 CODEX_PROJECT_NAME="$(basename -- "${CALLER_DIR}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "${CODEX_PROJECT_NAME}" ]] || CODEX_PROJECT_NAME="workspace"
-CODEX_CONTAINER_NAME="${CODEX_PROJECT_NAME}-codex"
+CODEX_CONTAINER_NAME="${CODEX_PROJECT_NAME}-codex-acp"
 
 # Profile fields; defaults describe the built-in "openai" profile.
 PROFILE_VAKA_FILE="${SCRIPT_DIR}/vaka.yaml"
@@ -1526,7 +1520,7 @@ fi
 startup_should_authenticate=0
 if (( ! auth_profile_selected )); then
   case "${auth_command}" in
-    up|start|restart)
+    ""|up|start|restart)
       if has_controlling_tty; then
         MYCODEX_AUTH="$(select_auth_profile_interactively)"
         AUTH_SELECTION_SOURCE="interactive first-run selection"
@@ -1642,13 +1636,34 @@ if (( startup_should_authenticate )); then
   run_login
   persist_auth_profile "${MYCODEX_AUTH}"
   echo "myCodexACP: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+elif [[ "${CREDENTIAL_KIND}" == "oauth-device-native" ]]; then
+  token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
+  case "${auth_command}" in
+    ""|up|start|restart)
+      if ! chatgpt_auth_complete "${token_file}"; then
+        if has_controlling_tty || [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
+          run_login
+        else
+          die "authentication for profile '${MYCODEX_AUTH}' is incomplete and startup is not interactive.
+myCodexACP: run '${SCRIPT_DIR}/myCodexACP login ${MYCODEX_AUTH}' before starting the workspace"
+        fi
+      fi
+      ;;
+    stdio)
+      chatgpt_auth_complete "${token_file}" \
+        || die "authentication for profile '${MYCODEX_AUTH}' is incomplete; run '${SCRIPT_DIR}/myCodexACP login ${MYCODEX_AUTH}' before connecting an ACP client"
+      ;;
+  esac
 fi
+
+MYCODEX_CREDENTIAL_STATUS="$(selected_credential_status)"
+export MYCODEX_CREDENTIAL_STATUS
 
 # Refuse to address a running stack through a different profile when the command
 # cannot recreate it. Canonical `start` and advanced `up` are exempt because
 # both reconcile the Compose project.
 case "${auth_command}" in
-  stdio|restart)
+  ""|stdio|restart)
     guard_profile_switch "${auth_command}"
     ;;
 esac
@@ -1656,7 +1671,7 @@ esac
 # Secrets are only needed for paths that may (re)create the stack. ps/exec,
 # logs, and attach render Compose config without them.
 case "${auth_command}" in
-  up|start|restart)
+  ""|up|start|restart)
     acquire_credentials
     ;;
 esac

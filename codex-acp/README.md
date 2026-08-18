@@ -17,9 +17,13 @@ Run setup from the project directory the ACP agent should see:
 
 ~~~bash
 cd /path/to/project
-/path/to/codex-acp/myCodexACP login chatgpt   # or: login openai
-/path/to/codex-acp/myCodexACP start
+/path/to/codex-acp/myCodexACP
 ~~~
+
+Like the sibling **myCodex** recipe, the default interactive flow selects an
+authentication profile when none is configured, completes its API-key or
+browser/device-code login, starts the stack, and waits for both the LiteLLM
+health endpoint and the ACP broker before reporting readiness.
 
 Then configure an ACP client to run:
 
@@ -42,7 +46,7 @@ For clients with JSON configuration, the equivalent shape is:
 The client must leave stdin and stdout connected. **stdio** only attaches to an
 already-started broker. It never builds containers, changes authentication, or
 launches a browser; missing setup is reported on stderr with an instruction to
-run **start**.
+run the launcher interactively first.
 
 If the launcher is run from the recipe directory itself, it safely selects or
 creates a child under **.workspaces/** instead of exposing the recipe, managed
@@ -52,6 +56,7 @@ credentials, or build files to the agent. With no terminal it uses the announced
 ## Commands
 
 ~~~bash
+./myCodexACP                 # interactive setup/start; the normal human flow
 ./myCodexACP start           # build/reconcile, start, and wait for the ACP broker
 ./myCodexACP login           # authenticate and persist a selected profile
 ./myCodexACP status          # read-only workspace, service, state, and broker status
@@ -61,14 +66,15 @@ credentials, or build files to the agent. With no terminal it uses the announced
 ./myCodexACP down -v         # also delete this workspace's Codex state
 ~~~
 
-With no command, the launcher prints help and performs no startup. Advanced
-maintenance operations such as **attach**, **exec**, **ps**, **logs**, and
-Compose passthrough remain available but are not part of the ACP client
-lifecycle.
+The explicit **start** form is useful for automation and for forcing Compose to
+reconcile the stack. Advanced maintenance operations such as **attach**,
+**exec**, **ps**, **logs**, and Compose passthrough remain available but are not
+part of the ACP client lifecycle.
 
 The caller's canonical current directory is bind-mounted at the identical path
 inside the container. The Compose project, container name, and default private
 Codex state volume are derived from the directory basename, matching myCodexACP.
+The agent container uses the unambiguous **&lt;workspace&gt;-codex-acp** suffix.
 Use distinct basenames when running several workspaces concurrently.
 
 Additional mounts and Compose overrides use the inherited launcher options:
@@ -92,11 +98,11 @@ The selected profile is remembered under the ignored **.secrets/** directory:
 | openai | OpenAI API key | **./myCodexACP login openai** |
 | vertex | Google service-account file | See **auth-profiles/vertex/profile.env** |
 
-Run **login** before **start**. If an interactive start has no selected profile,
-the launcher can still guide first-time selection; headless setup must select a
-profile explicitly with **MYCODEX_AUTH** or **--auth**. API keys can be supplied
-with **OPENAI_API_KEY** or **OPENAI_API_KEY_FILE**; managed copies are stored
-with restrictive permissions.
+Explicit **login** is optional in an interactive terminal: default startup asks
+for a profile and completes missing authentication before reporting readiness.
+Headless setup must authenticate first or provide the required profile and
+credential inputs. API keys can be supplied with **OPENAI_API_KEY** or
+**OPENAI_API_KEY_FILE**; managed copies are stored with restrictive permissions.
 
 The adapter runs with **NO_BROWSER=1**. Authentication belongs to the launcher
 phase above; ACP clients are not offered a second browser flow from inside the

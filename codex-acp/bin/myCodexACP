@@ -109,12 +109,13 @@ if [[ -z "${PROJECT_NAME}" ]]; then
   PROJECT_NAME="workspace"
 fi
 
-DEFAULT_CONTAINER_NAME="${PROJECT_NAME}-codex"
+DEFAULT_CONTAINER_NAME="${PROJECT_NAME}-codex-acp"
 CONTAINER_NAME="${CODEX_CONTAINER_NAME:-${DEFAULT_CONTAINER_NAME}}"
 
 usage() {
   cat <<'EOF'
 Usage:
+  myCodexACP [options]                Start this workspace interactively
   myCodexACP [options] start          Build and start this workspace
   myCodexACP login [profile]          Authenticate and select a profile
   myCodexACP [options] status         Show workspace and runtime status
@@ -563,6 +564,23 @@ is_running() {
     | grep -Fxq "${SERVICE}"
 }
 
+gateway_running() {
+  run_docker_compose ps --status running --services 2>/dev/null \
+    | grep -Fxq litellm
+}
+
+gateway_ready() {
+  gateway_running || return 1
+  run_docker_compose exec -T litellm python -c '
+import urllib.request
+
+with urllib.request.urlopen(
+    "http://127.0.0.1:4000/health/liveliness", timeout=1
+) as response:
+    raise SystemExit(0 if 200 <= response.status < 300 else 1)
+' >/dev/null 2>&1
+}
+
 attach_tmux() {
   compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
     env \
@@ -618,7 +636,8 @@ wait_for_container_ready() {
     elapsed="$((SECONDS - started))s"
     message_key="${state}|${phase}"
 
-    if [[ "${state}" == "running" ]] && container_broker_ready; then
+    if [[ "${state}" == "running" ]] \
+        && container_broker_ready && gateway_ready; then
       echo "myCodexACP: startup ready after ${elapsed}" >&2
       return 0
     fi
@@ -630,7 +649,9 @@ wait_for_container_ready() {
     fi
 
     if [[ "${message_key}" != "${last_message}" || "${SECONDS}" -ge "${next_progress}" ]]; then
-      if [[ -n "${phase}" ]]; then
+      if container_broker_ready && ! gateway_ready; then
+        echo "myCodexACP: startup ${elapsed}: waiting for LiteLLM gateway (${state:-unknown})" >&2
+      elif [[ -n "${phase}" ]]; then
         echo "myCodexACP: startup ${elapsed}: ${phase} (${state:-unknown})" >&2
       else
         echo "myCodexACP: startup ${elapsed}: waiting for ACP broker (${state:-unknown})" >&2
@@ -657,10 +678,24 @@ start_stack() {
   wait_for_container_ready
 }
 
+run_default() {
+  if ! is_running || ! gateway_running; then
+    start_stack
+    return
+  fi
+
+  if ! container_broker_ready || ! gateway_ready; then
+    wait_for_container_ready
+    return
+  fi
+
+  echo "myCodexACP: workspace is ready; ACP clients may connect with 'myCodexACP stdio'" >&2
+}
+
 run_stdio() {
-  is_running || die "workspace is not running; run 'myCodexACP start' before connecting an ACP client"
+  is_running || die "workspace is not running; run 'myCodexACP' interactively before connecting an ACP client"
   container_broker_ready \
-    || die "ACP broker is not ready; run 'myCodexACP start' and review 'myCodexACP status'"
+    || die "ACP broker is not ready; run 'myCodexACP' interactively and review 'myCodexACP status'"
 
   # The adapter is not this docker-exec process. This fixed relay gets no TTY,
   # runs as the host-mapped unprivileged identity, and sets no_new_privs before
@@ -779,7 +814,7 @@ print_info() {
 }
 
 print_status() {
-  local broker gateway profile state volume
+  local authentication broker gateway profile state volume
 
   state="$(container_state)"
   [[ -n "${state}" ]] || state="not created"
@@ -790,9 +825,10 @@ print_status() {
     broker="not ready"
   fi
 
-  if run_docker_compose ps --status running --services 2>/dev/null \
-      | grep -Fxq litellm; then
-    gateway="running"
+  if gateway_ready; then
+    gateway="ready"
+  elif gateway_running; then
+    gateway="not ready"
   else
     gateway="not running"
   fi
@@ -801,6 +837,7 @@ print_status() {
     '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
     "${CONTAINER_NAME}" 2>/dev/null || true)"
   [[ -n "${profile}" ]] || profile="${MYCODEX_AUTH:-not selected}"
+  authentication="${MYCODEX_CREDENTIAL_STATUS:-unknown}"
 
   if docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
     volume="exists"
@@ -812,6 +849,7 @@ print_status() {
   printf '  workspace         %s\n' "${CALLER_DIR}"
   printf '  project           %s\n' "${PROJECT_NAME}"
   printf '  profile           %s\n' "${profile}"
+  printf '  authentication    %s\n' "${authentication}"
   printf '  codex container   %s\n' "${state}"
   printf '  ACP broker        %s\n' "${broker}"
   printf '  LiteLLM gateway   %s\n' "${gateway}"
@@ -820,8 +858,8 @@ print_status() {
 }
 
 if [[ $# -eq 0 ]]; then
-  usage
-  exit 0
+  run_default
+  exit $?
 fi
 
 subcommand="$1"

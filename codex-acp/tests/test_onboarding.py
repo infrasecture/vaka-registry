@@ -187,9 +187,9 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     print("ok: headless recipe-directory launch uses the announced default workspace")
 
     env = clean_env(fake_bin, capture)
-    # Exercise lifecycle-command discovery through a supported global option;
-    # authentication decisions must not depend on start being argv[1].
-    command = [str(recipe / "myCodexACP"), "--private-env", "start"]
+    # No subcommand is the normal human flow, matching the sibling myCodex
+    # recipe: choose a profile, authenticate, and start the workspace.
+    command = [str(recipe / "myCodexACP")]
     code, output = run_in_pty(
         command,
         workspace,
@@ -291,8 +291,8 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         fail("headless OpenAI compatibility path failed", result.stderr.encode())
     if (recipe / ".secrets" / "auth_profile").exists():
         fail("an implicit headless compatibility choice was persisted")
-    if capture.read_text().splitlines()[-1] != "start":
-        fail("headless compatibility path did not reach the requested command")
+    if capture.read_text().splitlines()[-1] != "--private-env":
+        fail("headless compatibility path did not reach default startup")
     print("ok: explicit headless OpenAI credentials retain non-persistent compatibility")
 
 print("PASS: first-run authentication onboarding")

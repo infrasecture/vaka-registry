@@ -7,7 +7,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/vaka-codex-profiles.XXXXXX")"
 trap 'rm -rf -- "${TMP}"' EXIT
 
 RECIPE="${TMP}/recipe"
-# Unique basename so the derived container name (<project>-codex) cannot collide
+# Unique basename so the derived container name (<project>-codex-acp) cannot collide
 # with a real running stack when the profile-switch guard runs `docker inspect`.
 WORKSPACE="${TMP}/proj-${RANDOM}${RANDOM}"
 mkdir -p "${RECIPE}/bin" "${WORKSPACE}"
@@ -86,6 +86,9 @@ list_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodexACP" auth list)"
 grep -Eq '^\* openai[[:space:]]+OpenAI API key$' <<< "${list_output}" \
   || fail "auth list did not mark the selected profile"
 
+mkdir -p "${RECIPE}/.secrets/chatgpt-token"
+printf '{"access_token":"test-chatgpt-token"}\n' \
+  > "${RECIPE}/.secrets/chatgpt-token/auth.json"
 printf '%s\n' chatgpt > "${auth_profile_file}"
 persisted_capture="${TMP}/capture-persisted"
 run_wrapper "${persisted_capture}"
