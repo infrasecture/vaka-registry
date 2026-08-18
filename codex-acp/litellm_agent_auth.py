@@ -1,4 +1,4 @@
-"""Least-privilege authentication for the embedded myCodex LiteLLM gateway."""
+"""Least-privilege authentication for the embedded myCodexACP LiteLLM gateway."""
 
 import os
 import secrets

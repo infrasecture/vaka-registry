@@ -1,5 +1,5 @@
 # Compose overlay for the Vertex AI profile (SCAFFOLD). Additive over
-# docker-compose.yaml: binds the host credential file (resolved by ./myCodex to
+# docker-compose.yaml: binds the host credential file (resolved by ./myCodexACP to
 # MYCODEX_CREDENTIAL_FILE) read-only into the sidecar and points Google's client
 # libraries at it. Project/location pass through from the environment.
 services:

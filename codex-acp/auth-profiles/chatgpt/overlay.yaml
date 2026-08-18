@@ -1,6 +1,6 @@
 # Compose overlay for the ChatGPT-subscription profile. Additive over
 # docker-compose.yaml: it only teaches the LiteLLM sidecar where to keep the
-# OAuth token. The provider config swap is driven by ./myCodex via
+# OAuth token. The provider config swap is driven by ./myCodexACP via
 # MYCODEX_LITELLM_CONFIG; model selection remains Codex-owned unless the user
 # explicitly sets MYCODEX_MODEL.
 #

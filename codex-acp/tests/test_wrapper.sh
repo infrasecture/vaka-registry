@@ -8,10 +8,10 @@ trap 'rm -rf -- "${TMP}"' EXIT
 RECIPE="${TMP}/recipe"
 WORKSPACE="${TMP}/workspace"
 mkdir -p "${RECIPE}/bin" "${WORKSPACE}"
-cp "${RECIPE_SOURCE}/myCodex" "${RECIPE}/myCodex"
-chmod 755 "${RECIPE}/myCodex"
+cp "${RECIPE_SOURCE}/myCodexACP" "${RECIPE}/myCodexACP"
+chmod 755 "${RECIPE}/myCodexACP"
 
-cat > "${RECIPE}/bin/myCodex" <<'STUB'
+cat > "${RECIPE}/bin/myCodexACP" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 : "${MYCODEX_TEST_CAPTURE:?}"
@@ -22,7 +22,7 @@ printf '%s\n' "${LITELLM_MASTER_KEY}" > "${MYCODEX_TEST_CAPTURE}.proxy"
 printf '%s\n' "${MYCODEX_IMAGE_NAME:?}" > "${MYCODEX_TEST_CAPTURE}.image-name"
 printf '%s\n' "${MYCODEX_IMAGE_TAG:?}" > "${MYCODEX_TEST_CAPTURE}.image-tag"
 STUB
-chmod 755 "${RECIPE}/bin/myCodex"
+chmod 755 "${RECIPE}/bin/myCodexACP"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -38,7 +38,7 @@ run_wrapper() {
   shift
   (
     cd "${WORKSPACE}"
-    env MYCODEX_TEST_CAPTURE="${capture}" "$@" "${RECIPE}/myCodex" up
+    env MYCODEX_TEST_CAPTURE="${capture}" "$@" "${RECIPE}/myCodexACP" start
   )
 }
 
@@ -144,4 +144,4 @@ if [[ ${#temporary_keys[@]} -ne 0 ]]; then
   fail "temporary key file remained after concurrent publication"
 fi
 
-echo "PASS: codex wrapper resolves and persists secrets consistently"
+echo "PASS: myCodexACP wrapper resolves and persists secrets consistently"

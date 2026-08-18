@@ -98,11 +98,11 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     workspace.mkdir()
     fake_bin.mkdir()
 
-    shutil.copy2(SOURCE / "myCodex", recipe / "myCodex")
+    shutil.copy2(SOURCE / "myCodexACP", recipe / "myCodexACP")
     shutil.copy2(SOURCE / "vaka.yaml", recipe / "vaka.yaml")
     shutil.copytree(SOURCE / "auth-profiles", recipe / "auth-profiles")
 
-    launcher = recipe / "bin" / "myCodex"
+    launcher = recipe / "bin" / "myCodexACP"
     launcher.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -123,9 +123,26 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     )
     docker.chmod(0o755)
 
+    # Recipe-level help must not select or create a project workspace.
+    result = subprocess.run(
+        [str(recipe / "myCodexACP"), "help"],
+        cwd=recipe,
+        env=clean_env(fake_bin, capture),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail("help failed from the recipe directory", result.stderr.encode())
+    if (recipe / ".workspaces").exists():
+        fail("help created a recipe workspace", result.stderr.encode())
+    print("ok: recipe-level help does not select or create a workspace")
+
     # Running from the recipe root selects a confined child workspace instead
     # of mounting the recipe (and its credentials) into the agent container.
-    info_command = [str(recipe / "myCodex"), "info"]
+    info_command = [str(recipe / "myCodexACP"), "info"]
     code, output = run_in_pty(
         info_command,
         recipe,
@@ -170,7 +187,9 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     print("ok: headless recipe-directory launch uses the announced default workspace")
 
     env = clean_env(fake_bin, capture)
-    command = [str(recipe / "myCodex"), "up"]
+    # Exercise lifecycle-command discovery through a supported global option;
+    # authentication decisions must not depend on start being argv[1].
+    command = [str(recipe / "myCodexACP"), "--private-env", "start"]
     code, output = run_in_pty(
         command,
         workspace,
@@ -197,7 +216,7 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
     )
     if code != 0:
         fail(f"interactive onboarding exited {code}", output)
-    menu = output.find(b"Choose how myCodex should authenticate:")
+    menu = output.find(b"Choose how myCodexACP should authenticate:")
     key_prompt = output.find(b"Enter OPENAI_API_KEY:")
     if menu < 0 or key_prompt < 0 or menu > key_prompt:
         fail("authentication choice was not shown before the API-key prompt", output)
@@ -272,7 +291,7 @@ with tempfile.TemporaryDirectory(prefix="vaka-codex-onboarding.") as temp:
         fail("headless OpenAI compatibility path failed", result.stderr.encode())
     if (recipe / ".secrets" / "auth_profile").exists():
         fail("an implicit headless compatibility choice was persisted")
-    if capture.read_text().splitlines()[-1] != "up":
+    if capture.read_text().splitlines()[-1] != "start":
         fail("headless compatibility path did not reach the requested command")
     print("ok: explicit headless OpenAI credentials retain non-persistent compatibility")
 

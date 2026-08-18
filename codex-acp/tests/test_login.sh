@@ -10,8 +10,8 @@ RECIPE="${TMP}/recipe"
 WORKSPACE="${TMP}/workspace"
 FAKE_BIN="${TMP}/fake-bin"
 mkdir -p "${RECIPE}/bin" "${WORKSPACE}" "${FAKE_BIN}"
-cp "${RECIPE_SOURCE}/myCodex" "${RECIPE}/myCodex"
-chmod 755 "${RECIPE}/myCodex"
+cp "${RECIPE_SOURCE}/myCodexACP" "${RECIPE}/myCodexACP"
+chmod 755 "${RECIPE}/myCodexACP"
 cp "${RECIPE_SOURCE}/vaka.yaml" "${RECIPE}/vaka.yaml"
 cp -R "${RECIPE_SOURCE}/auth-profiles" "${RECIPE}/auth-profiles"
 
@@ -20,7 +20,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # The vendored launcher is not under test here. This stub models one Compose
 # service closely enough to verify service scope, attempt-bounded logs, and
 # restoration when login created the sidecar.
-cat > "${RECIPE}/bin/myCodex" <<'STUB'
+cat > "${RECIPE}/bin/myCodexACP" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${MYCODEX_TEST_LAUNCHER_CALLS:?}"
@@ -62,7 +62,7 @@ case "${args}" in
     ;;
 esac
 STUB
-chmod 755 "${RECIPE}/bin/myCodex"
+chmod 755 "${RECIPE}/bin/myCodexACP"
 
 # Fake the profile guard, sidecar-state snapshot, and two sidecar-local execs.
 cat > "${FAKE_BIN}/docker" <<'STUB'
@@ -180,7 +180,7 @@ run_login() {
       MYCODEX_TEST_CONTAINER_ID="${CONTAINER_ID}" \
       MYCODEX_TEST_PRIOR_STATE="${prior_state}" \
       MYCODEX_TEST_EXPECT_CLEAN_TOKEN="${expect_clean_token}" \
-      "${RECIPE}/myCodex" login
+      "${RECIPE}/myCodexACP" login
   )
 }
 
@@ -202,7 +202,7 @@ grep -Fq 'Enter code: TEST-CODE' <<< "${output}" \
   || fail "startup device-code output was hidden behind readiness"
 [[ "${output}" == *"LiteLLM may print transient startup errors"*"ERROR transient provider initialization message"* ]] \
   || fail "transient LiteLLM output appeared before the startup guidance"
-grep -Fq 'authentication has failed only if myCodex prints a final error' <<< "${output}" \
+grep -Fq 'authentication has failed only if myCodexACP prints a final error' <<< "${output}" \
   || fail "startup guidance did not distinguish transient output from terminal failure"
 [[ "$(request_count)" == "0" ]] || fail "OAuth started before LiteLLM was ready"
 grep -Eq 'up -d litellm$' "${LAUNCHER_CALLS}" \

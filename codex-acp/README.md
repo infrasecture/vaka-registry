@@ -17,14 +17,14 @@ Run setup from the project directory the ACP agent should see:
 
 ~~~bash
 cd /path/to/project
-/path/to/codex-acp/myCodex login chatgpt   # or: login openai
-/path/to/codex-acp/myCodex up -d
+/path/to/codex-acp/myCodexACP login chatgpt   # or: login openai
+/path/to/codex-acp/myCodexACP start
 ~~~
 
 Then configure an ACP client to run:
 
 ~~~text
-command: /absolute/path/to/codex-acp/myCodex
+command: /absolute/path/to/codex-acp/myCodexACP
 args:    stdio
 cwd:     /path/to/project
 ~~~
@@ -33,14 +33,16 @@ For clients with JSON configuration, the equivalent shape is:
 
 ~~~json
 {
-  "command": "/absolute/path/to/codex-acp/myCodex",
+  "command": "/absolute/path/to/codex-acp/myCodexACP",
   "args": ["stdio"],
   "cwd": "/path/to/project"
 }
 ~~~
 
-The client must leave stdin and stdout connected. **stdio** is a long-running
-ACP transport command, not an interactive terminal command.
+The client must leave stdin and stdout connected. **stdio** only attaches to an
+already-started broker. It never builds containers, changes authentication, or
+launches a browser; missing setup is reported on stderr with an instruction to
+run **start**.
 
 If the launcher is run from the recipe directory itself, it safely selects or
 creates a child under **.workspaces/** instead of exposing the recipe, managed
@@ -50,29 +52,35 @@ credentials, or build files to the agent. With no terminal it uses the announced
 ## Commands
 
 ~~~bash
-./myCodex stdio            # ACP transport; starts the stack if needed
-./myCodex up -d            # build/reconcile the image and start this workspace
-./myCodex                   # start if needed, then attach to the original tmux session
-./myCodex attach            # attach to that existing tmux session
-./myCodex exec bash         # trusted maintenance shell; see the warning below
-./myCodex ps
-./myCodex logs codex
-./myCodex stop
-./myCodex down              # retain this workspace's Codex state
-./myCodex down -v           # also delete this workspace's Codex state
+./myCodexACP start           # build/reconcile, start, and wait for the ACP broker
+./myCodexACP login           # authenticate and persist a selected profile
+./myCodexACP status          # read-only workspace, service, state, and broker status
+./myCodexACP stdio           # attach one ACP client; requires start first
+./myCodexACP stop            # stop both services and retain containers/state
+./myCodexACP down            # remove the stack and retain Codex state
+./myCodexACP down -v         # also delete this workspace's Codex state
 ~~~
+
+With no command, the launcher prints help and performs no startup. Advanced
+maintenance operations such as **attach**, **exec**, **ps**, **logs**, and
+Compose passthrough remain available but are not part of the ACP client
+lifecycle.
 
 The caller's canonical current directory is bind-mounted at the identical path
 inside the container. The Compose project, container name, and default private
-Codex state volume are derived from the directory basename, matching myCodex.
+Codex state volume are derived from the directory basename, matching myCodexACP.
 Use distinct basenames when running several workspaces concurrently.
 
 Additional mounts and Compose overrides use the inherited launcher options:
 
 ~~~bash
-./myCodex -v /host/data:/data:ro stdio
-./myCodex -f ./local-policy-overlay.yaml up -d
+./myCodexACP -v /host/data:/data:ro start
+./myCodexACP -f ./local-policy-overlay.yaml start
 ~~~
+
+Use the same options before **status**, **stdio**, **stop**, or **down** when an
+override changes how the Compose project is resolved. Only **start** applies
+mount or configuration changes.
 
 ## Authentication profiles
 
@@ -80,14 +88,15 @@ The selected profile is remembered under the ignored **.secrets/** directory:
 
 | Profile | Upstream credential | Setup |
 |---|---|---|
-| chatgpt | ChatGPT subscription OAuth | **./myCodex login chatgpt** |
-| openai | OpenAI API key | **./myCodex login openai** |
+| chatgpt | ChatGPT subscription OAuth | **./myCodexACP login chatgpt** |
+| openai | OpenAI API key | **./myCodexACP login openai** |
 | vertex | Google service-account file | See **auth-profiles/vertex/profile.env** |
 
-On an interactive first startup, the launcher asks which profile to use. For
-headless setup, select it explicitly with **MYCODEX_AUTH** or **--auth**. API
-keys can be supplied with **OPENAI_API_KEY** or **OPENAI_API_KEY_FILE**;
-managed copies are stored with restrictive permissions.
+Run **login** before **start**. If an interactive start has no selected profile,
+the launcher can still guide first-time selection; headless setup must select a
+profile explicitly with **MYCODEX_AUTH** or **--auth**. API keys can be supplied
+with **OPENAI_API_KEY** or **OPENAI_API_KEY_FILE**; managed copies are stored
+with restrictive permissions.
 
 The adapter runs with **NO_BROWSER=1**. Authentication belongs to the launcher
 phase above; ACP clients are not offered a second browser flow from inside the
@@ -114,7 +123,7 @@ recipe therefore uses this split:
    user in the original process tree.
 3. Each Unix-socket connection makes the broker spawn one pinned **codex-acp**
    child. Codex App Server remains below that child in the same safe tree.
-4. **myCodex stdio** uses **compose exec -T --user UID:GID** only for the fixed
+4. **myCodexACP stdio** uses **compose exec -T --user UID:GID** only for the fixed
    **acp-connect.mjs** byte relay. Before connecting, setpriv applies
    **no_new_privs**. The relay cannot execute client-selected commands.
 
@@ -123,7 +132,7 @@ host, avoiding Unix-socket sharing differences across Docker Desktop and
 Colima. Adapter stderr goes to the Codex container log; protocol stdout remains
 newline-delimited JSON only.
 
-Do not replace **stdio** with **myCodex exec codex-acp**, **docker exec
+Do not replace **stdio** with **myCodexACP exec codex-acp**, **docker exec
 codex-acp**, or a Compose exec command. That would put the adapter in the
 independent exec process tree and discard the capability invariant.
 
@@ -159,7 +168,7 @@ When updating:
 1. Change the exact adapter version in package.json.
 2. Regenerate package-lock.json with npm.
 3. Confirm the bundled Codex compatibility and Node engine.
-4. Update the local image tag in myCodex and the recipe version.
+4. Update the local image tag in myCodexACP and the recipe version.
 5. Run tests/run.sh, especially the live capability test.
 
 The allowlist-style **.dockerignore** is separate from **.gitignore** on purpose.
@@ -174,7 +183,7 @@ is rejected. LiteLLM has profile-specific HTTPS destinations for the selected
 provider. Customize a copied vaka.yaml or profile policy when a project needs
 additional hosts rather than broadening the shipped default.
 
-Run the stack through **myCodex**, not bare Docker Compose: the wrapper supplies
+Run the stack through **myCodexACP**, not bare Docker Compose: the wrapper supplies
 host identity, path parity, state names, auth overlays, secrets, the local image
 contract, and routes every Compose operation through Vaka.
 
@@ -190,6 +199,6 @@ initializes the adapter, checks that stdout is clean JSON, and reads **/proc**
 for the live broker, adapter, and Codex App Server. It fails if NET_ADMIN is
 present in any bounding set or if the exec-side relay lacks no_new_privs.
 
-The launcher began from [myCodex](https://github.com/emsi/myCodex) and the
-registry's sibling **codex** recipe. Recipe-specific changes are kept small:
-local image building, the **stdio** command, and the broker/relay lifecycle.
+The internal launcher began from [myCodex](https://github.com/emsi/myCodex) and
+the registry's sibling **codex** recipe. **myCodexACP** is the recipe-specific
+public control interface around that reused implementation.

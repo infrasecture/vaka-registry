@@ -29,43 +29,43 @@ mycodex_try_shell_bash() {
     return 1
   fi
 
-  printf 'myCodex: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
+  printf 'myCodexACP: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
     "${BASH_VERSION}" "${BASH:-bash}" "${candidate_version}" "${candidate}" >&2
   exec "${candidate}" "${BASH_SOURCE[0]}" "$@"
   return 1
 }
 
 mycodex_bash_failure() {
-  printf 'myCodex: Bash 4.4 or newer is required; running Bash %s via %s.\n' \
+  printf 'myCodexACP: Bash 4.4 or newer is required; running Bash %s via %s.\n' \
     "${BASH_VERSION}" "${BASH:-bash}" >&2
-  printf 'myCodex: SHELL=%s did not identify an executable Bash 4.4+ fallback.\n' \
+  printf 'myCodexACP: SHELL=%s did not identify an executable Bash 4.4+ fallback.\n' \
     "${SHELL:-<unset>}" >&2
 
   case "$(uname -s 2>/dev/null || true)" in
     Darwin)
       cat >&2 <<'EOF'
-myCodex: on macOS, install a current Bash and put Homebrew before /bin:
+myCodexACP: on macOS, install a current Bash and put Homebrew before /bin:
   brew install bash
   export PATH="$(brew --prefix)/bin:$PATH"
 Changing the login shell alone is not enough: /usr/bin/env normally selects
-bash from PATH. myCodex also tries a compatible Bash named by SHELL.
+bash from PATH. myCodexACP also tries a compatible Bash named by SHELL.
 EOF
       ;;
     Linux)
       cat >&2 <<'EOF'
-myCodex: install or upgrade Bash with your distribution package manager, for
+myCodexACP: install or upgrade Bash with your distribution package manager, for
 example `apt-get install bash`, `dnf install bash`, or `apk add bash`, then
 verify `bash --version` reports 4.4 or newer.
 EOF
       ;;
     FreeBSD)
       cat >&2 <<'EOF'
-myCodex: install a current Bash with `pkg install bash`, then put its directory
+myCodexACP: install a current Bash with `pkg install bash`, then put its directory
 before any older Bash in PATH.
 EOF
       ;;
     *)
-      printf 'myCodex: install Bash 4.4+ and ensure it is selected through PATH or SHELL.\n' >&2
+      printf 'myCodexACP: install Bash 4.4+ and ensure it is selected through PATH or SHELL.\n' >&2
       ;;
   esac
 }
@@ -115,16 +115,19 @@ CONTAINER_NAME="${CODEX_CONTAINER_NAME:-${DEFAULT_CONTAINER_NAME}}"
 usage() {
   cat <<'EOF'
 Usage:
-  myCodex [options]                  Start stack if needed, then attach
-  myCodex [options] stdio            Serve one codex-acp connection on stdio
-  myCodex [options] attach           Attach to tmux session in codex service
-  myCodex [options] info             Print the resolved configuration and exit
-  myCodex [options] ps [args...]     docker compose ps
-  myCodex [options] start [args...]  docker compose start (defaults to codex)
-  myCodex [options] stop [args...]   docker compose stop (defaults to codex)
-  myCodex [options] restart [args...] docker compose restart (defaults to codex)
-  myCodex [options] exec <cmd...>    docker compose exec -it codex <cmd...>
-  myCodex [options] <compose-cmd> ... Pass through to docker compose
+  myCodexACP [options] start          Build and start this workspace
+  myCodexACP login [profile]          Authenticate and select a profile
+  myCodexACP [options] status         Show workspace and runtime status
+  myCodexACP [options] stdio          Attach one ACP client over stdio
+  myCodexACP [options] stop           Stop this workspace without deleting it
+  myCodexACP [options] down [-v]      Remove the stack; -v also removes state
+
+Advanced:
+  myCodexACP [options] attach         Attach to the original tmux session
+  myCodexACP [options] exec <cmd...>  Run a trusted maintenance command
+  myCodexACP [options] info           Print resolved configuration
+  myCodexACP [options] ps [args...]   Show Compose service state
+  myCodexACP [options] <compose-cmd>  Pass through to Vaka Compose
 
 Options:
   --private-env                      Use a per-project Codex state volume
@@ -134,7 +137,7 @@ EOF
 }
 
 die() {
-  echo "myCodex: $*" >&2
+  echo "myCodexACP: $*" >&2
   exit 2
 }
 
@@ -224,8 +227,6 @@ is_managed_mount_target() {
 EXTRA_VOLUME_SPECS=()
 ADDITIONAL_COMPOSE_FILES=()
 PRIVATE_ENV=0
-RUNTIME_CONFIG_CHANGED=0
-STDIO_RECREATE_REQUIRED=0
 EXTRA_VOLUME_OVERRIDE_FILE=""
 HOST_GROUPS="$(host_group_specs)"
 
@@ -261,7 +262,7 @@ add_extra_volume() {
   fi
 
   if is_managed_mount_target "${target}"; then
-    die "volume target conflicts with a managed myCodex mount: ${target}"
+    die "volume target conflicts with a managed myCodexACP mount: ${target}"
   fi
 
   source="$(normalize_mount_source "${source}")"
@@ -272,8 +273,6 @@ add_extra_volume() {
     EXTRA_VOLUME_SPECS+=("${source}:${target}")
   fi
 
-  RUNTIME_CONFIG_CHANGED=1
-  STDIO_RECREATE_REQUIRED=1
 }
 
 add_compose_file() {
@@ -286,15 +285,12 @@ add_compose_file() {
   fi
 
   ADDITIONAL_COMPOSE_FILES+=("${file}")
-  RUNTIME_CONFIG_CHANGED=1
-  STDIO_RECREATE_REQUIRED=1
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --private-env)
       PRIVATE_ENV=1
-      RUNTIME_CONFIG_CHANGED=1
       shift
       ;;
     -v|--volume)
@@ -346,13 +342,6 @@ if [[ "${PRIVATE_ENV}" == "1" ]]; then
   STATE_VOLUME_KIND="per-project"
 fi
 
-if [[ "${CONTAINER_NAME}" != "${DEFAULT_CONTAINER_NAME}" ]] \
-  || [[ "${STATE_VOLUME_NAME}" != "codex_state" ]] \
-  || [[ "${SESSION}" != "codex" ]] \
-  || [[ "${AUTO_ATTACH}" != 0 ]]; then
-  RUNTIME_CONFIG_CHANGED=1
-fi
-
 ensure_state_volume() {
   if ! docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
     docker volume create "${STATE_VOLUME_NAME}" >/dev/null
@@ -397,7 +386,7 @@ ensure_runtime_image_tag() {
       ;;
   esac
 
-  echo "myCodex: using ${IMAGE_NAME}:${IMAGE_TAG}" >&2
+  echo "myCodexACP: using ${IMAGE_NAME}:${IMAGE_TAG}" >&2
 }
 
 has_arg() {
@@ -510,7 +499,7 @@ run_docker_compose() {
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     CODEX_BYOBU_SESSION="${SESSION}" \
     CODEX_AUTO_ATTACH="${AUTO_ATTACH}" \
-    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
+    MYCODEX_ATTACH_HINT="${PROJECT_ROOT}/myCodexACP" \
     MYCODEX_LAUNCHED_BY_WRAPPER=1 \
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
     MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
@@ -570,7 +559,8 @@ compose_without_state_volume_creation() {
 }
 
 is_running() {
-  compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+  run_docker_compose ps --status running --services 2>/dev/null \
+    | grep -Fxq "${SERVICE}"
 }
 
 attach_tmux() {
@@ -606,10 +596,10 @@ container_startup_status() {
   esac
 }
 
-container_session_ready() {
-  docker exec "${CONTAINER_NAME}" gosu "${HOST_USER}" \
-    env CODEX_HOME="${CONTAINER_HOME}/.codex" \
-    byobu-tmux has-session -t "${SESSION}" >/dev/null 2>&1
+container_broker_ready() {
+  [[ "$(container_state)" == "running" ]] || return 1
+  docker exec --user "${HOST_UID}:${HOST_GID}" "${CONTAINER_NAME}" \
+    test -S "${CONTAINER_HOME}/.codex/run/codex-acp.sock" >/dev/null 2>&1
 }
 
 wait_for_container_ready() {
@@ -628,22 +618,22 @@ wait_for_container_ready() {
     elapsed="$((SECONDS - started))s"
     message_key="${state}|${phase}"
 
-    if [[ "${state}" == "running" ]] && { [[ "${phase}" == "ready" ]] || container_session_ready; }; then
-      echo "myCodex: startup ready after ${elapsed}" >&2
+    if [[ "${state}" == "running" ]] && container_broker_ready; then
+      echo "myCodexACP: startup ready after ${elapsed}" >&2
       return 0
     fi
 
     if [[ "${state}" == "exited" || "${state}" == "dead" ]]; then
-      echo "myCodex: container ${state} during startup" >&2
+      echo "myCodexACP: container ${state} during startup" >&2
       compose_run logs --tail 80 "${SERVICE}" >&2 || true
       return 1
     fi
 
     if [[ "${message_key}" != "${last_message}" || "${SECONDS}" -ge "${next_progress}" ]]; then
       if [[ -n "${phase}" ]]; then
-        echo "myCodex: startup ${elapsed}: ${phase} (${state:-unknown})" >&2
+        echo "myCodexACP: startup ${elapsed}: ${phase} (${state:-unknown})" >&2
       else
-        echo "myCodex: startup ${elapsed}: waiting for tmux session (${state:-unknown})" >&2
+        echo "myCodexACP: startup ${elapsed}: waiting for ACP broker (${state:-unknown})" >&2
       fi
       last_message="${message_key}"
       next_progress=$((SECONDS + STARTUP_PROGRESS_INTERVAL_SECONDS))
@@ -652,7 +642,7 @@ wait_for_container_ready() {
     sleep 1
   done
 
-  echo "myCodex: startup timed out after ${WAIT_TIMEOUT_SECONDS}s" >&2
+  echo "myCodexACP: startup timed out after ${WAIT_TIMEOUT_SECONDS}s" >&2
   compose_run ps "${SERVICE}" >&2 || true
   compose_run logs --tail 80 "${SERVICE}" >&2 || true
   return 1
@@ -668,11 +658,9 @@ start_stack() {
 }
 
 run_stdio() {
-  if ! is_running || [[ "${STDIO_RECREATE_REQUIRED}" == "1" ]]; then
-    # Startup tools must neither consume the ACP request stream nor write
-    # orchestration diagnostics to protocol stdout.
-    start_stack </dev/null >&2
-  fi
+  is_running || die "workspace is not running; run 'myCodexACP start' before connecting an ACP client"
+  container_broker_ready \
+    || die "ACP broker is not ready; run 'myCodexACP start' and review 'myCodexACP status'"
 
   # The adapter is not this docker-exec process. This fixed relay gets no TTY,
   # runs as the host-mapped unprivileged identity, and sets no_new_privs before
@@ -686,12 +674,12 @@ remove_state_volume() {
   local removed
 
   if ! docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
-    echo "myCodex: state volume ${STATE_VOLUME_NAME} did not exist" >&2
+    echo "myCodexACP: state volume ${STATE_VOLUME_NAME} did not exist" >&2
     return
   fi
 
   removed="$(docker volume rm "${STATE_VOLUME_NAME}")"
-  echo "myCodex: removed state volume ${removed}" >&2
+  echo "myCodexACP: removed state volume ${removed}" >&2
 }
 
 run_up() {
@@ -732,14 +720,6 @@ run_down() {
   fi
 }
 
-run_default() {
-  if ! is_running || [[ "${RUNTIME_CONFIG_CHANGED}" == "1" ]]; then
-    start_stack
-  fi
-
-  attach_tmux
-}
-
 # print_info emits the effective, resolved configuration as plain facts. It is
 # read-only: it reads volume metadata but never creates a volume or starts a
 # container. Values reflect the options given on the same command line (e.g.
@@ -763,7 +743,7 @@ print_info() {
     vol_state="not created yet"
   fi
 
-  printf 'myCodex configuration\n'
+  printf 'myCodexACP configuration\n'
   printf '  project name      %s\n' "${PROJECT_NAME}"
   printf '  container name    %s\n' "${CONTAINER_NAME}"
   printf '  tmux session      %s\n' "${SESSION}"
@@ -798,9 +778,50 @@ print_info() {
   fi
 }
 
+print_status() {
+  local broker gateway profile state volume
+
+  state="$(container_state)"
+  [[ -n "${state}" ]] || state="not created"
+
+  if container_broker_ready; then
+    broker="ready"
+  else
+    broker="not ready"
+  fi
+
+  if run_docker_compose ps --status running --services 2>/dev/null \
+      | grep -Fxq litellm; then
+    gateway="running"
+  else
+    gateway="not running"
+  fi
+
+  profile="$(docker inspect --format \
+    '{{ index .Config.Labels "agent.vaka.codex.auth-profile" }}' \
+    "${CONTAINER_NAME}" 2>/dev/null || true)"
+  [[ -n "${profile}" ]] || profile="${MYCODEX_AUTH:-not selected}"
+
+  if docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
+    volume="exists"
+  else
+    volume="not created"
+  fi
+
+  printf 'myCodexACP status\n'
+  printf '  workspace         %s\n' "${CALLER_DIR}"
+  printf '  project           %s\n' "${PROJECT_NAME}"
+  printf '  profile           %s\n' "${profile}"
+  printf '  codex container   %s\n' "${state}"
+  printf '  ACP broker        %s\n' "${broker}"
+  printf '  LiteLLM gateway   %s\n' "${gateway}"
+  printf '  state volume      %s [%s]\n' "${STATE_VOLUME_NAME}" "${volume}"
+  printf '  image             %s:%s\n' "${IMAGE_NAME}" "${IMAGE_TAG:-unresolved}"
+}
+
 if [[ $# -eq 0 ]]; then
-  run_default
-  exit $?
+  usage
+  exit 0
 fi
 
 subcommand="$1"
@@ -813,9 +834,13 @@ case "${subcommand}" in
   attach)
     attach_tmux
     ;;
-  stdio|acp)
-    [[ $# -eq 0 ]] || die "${subcommand} accepts no arguments"
+  stdio)
+    [[ $# -eq 0 ]] || die "stdio accepts no arguments"
     run_stdio
+    ;;
+  status)
+    [[ $# -eq 0 ]] || die "status accepts no arguments"
+    print_status
     ;;
   info)
     print_info
@@ -824,18 +849,12 @@ case "${subcommand}" in
     compose ps "$@"
     ;;
   start)
-    if [[ $# -eq 0 ]]; then
-      compose start "${SERVICE}"
-    else
-      compose start "$@"
-    fi
+    [[ $# -eq 0 ]] || die "start accepts no arguments"
+    start_stack
     ;;
   stop)
-    if [[ $# -eq 0 ]]; then
-      compose stop "${SERVICE}"
-    else
-      compose stop "$@"
-    fi
+    [[ $# -eq 0 ]] || die "stop accepts no arguments"
+    compose_without_state_volume_creation stop
     ;;
   restart)
     if [[ $# -eq 0 ]]; then
@@ -846,7 +865,7 @@ case "${subcommand}" in
     ;;
   exec)
     if [[ $# -eq 0 ]]; then
-      echo "myCodex: exec requires a command" >&2
+      echo "myCodexACP: exec requires a command" >&2
       usage >&2
       exit 2
     fi

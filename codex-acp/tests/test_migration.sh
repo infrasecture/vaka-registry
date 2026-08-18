@@ -11,20 +11,20 @@ WORKSPACE="${TMP}/workspace"
 FAKE_BIN="${TMP}/fake-bin"
 CAPTURE="${TMP}/launcher"
 mkdir -p "${RECIPE}/bin" "${RECIPE}/.secrets" "${WORKSPACE}" "${FAKE_BIN}"
-cp "${RECIPE_SOURCE}/myCodex" "${RECIPE}/myCodex"
-chmod 755 "${RECIPE}/myCodex"
+cp "${RECIPE_SOURCE}/myCodexACP" "${RECIPE}/myCodexACP"
+chmod 755 "${RECIPE}/myCodexACP"
 cp "${RECIPE_SOURCE}/vaka.yaml" "${RECIPE}/vaka.yaml"
 cp -R "${RECIPE_SOURCE}/auth-profiles" "${RECIPE}/auth-profiles"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-cat > "${RECIPE}/bin/myCodex" <<'STUB'
+cat > "${RECIPE}/bin/myCodexACP" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${MYCODEX_TEST_CAPTURE:?}"
 printf '%s\n' "${LITELLM_MASTER_KEY-}" > "${MYCODEX_TEST_CAPTURE}.gateway-admin"
 STUB
-chmod 755 "${RECIPE}/bin/myCodex"
+chmod 755 "${RECIPE}/bin/myCodexACP"
 
 cat > "${FAKE_BIN}/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -76,7 +76,7 @@ run_wrapper() {
       OPENAI_API_KEY=test-provider-key \
       MYCODEX_TEST_CAPTURE="${CAPTURE}" \
       MYCODEX_TEST_CONTAINER_STATE="$1" \
-      "${RECIPE}/myCodex" "${@:2}"
+      "${RECIPE}/myCodexACP" "${@:2}"
   )
 }
 
@@ -89,7 +89,7 @@ if run_wrapper legacy up > /dev/null 2> "${legacy_error}"; then
 fi
 grep -Fq "predates restricted gateway authentication" "${legacy_error}" \
   || fail "legacy-container failure did not explain the security boundary"
-grep -Fq "${RECIPE}/myCodex down" "${legacy_error}" \
+grep -Fq "${RECIPE}/myCodexACP down" "${legacy_error}" \
   || fail "legacy-container failure did not provide the non-destructive migration command"
 [[ ! -e "${CAPTURE}" ]] || fail "legacy container reached the launcher"
 [[ -e "${RECIPE}/.secrets/litellm_master_key" ]] \
@@ -143,7 +143,7 @@ if (
     LITELLM_MASTER_KEY=previously-exposed-override \
     MYCODEX_TEST_CAPTURE="${CAPTURE}" \
     MYCODEX_TEST_CONTAINER_STATE=absent \
-    "${RECIPE}/myCodex" up
+    "${RECIPE}/myCodexACP" up
 ) > /dev/null 2> "${external_error}"; then
   fail "external legacy administrator key override was accepted"
 fi

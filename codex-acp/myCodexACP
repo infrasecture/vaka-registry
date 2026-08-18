@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recipe wrapper around the launcher vendored from myCodex.
+# ACP-specific control wrapper around the launcher vendored from myCodex.
 #
 # It adds only what upstream does not provide: it selects and acquires provider
 # credentials, maintains a sidecar-only LiteLLM administrator key, and routes
@@ -36,12 +36,12 @@ if ! recipe_bash_is_supported; then
   esac
 
   if [[ -n "${candidate_version}" ]]; then
-    printf 'myCodex: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
+    printf 'myCodexACP: Bash %s (%s) is too old; restarting with Bash %s from SHELL=%s\n' \
       "${BASH_VERSION}" "${BASH:-bash}" "${candidate_version}" "${candidate}" >&2
     exec "${candidate}" "${BASH_SOURCE[0]}" "$@"
   fi
 
-  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "$@"
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP" "$@"
 fi
 
 unset -f recipe_bash_is_supported
@@ -57,7 +57,7 @@ recipe_workspace_name_is_valid() {
 }
 
 recipe_workspace_die() {
-  echo "myCodex: $*" >&2
+  echo "myCodexACP: $*" >&2
   exit 2
 }
 
@@ -81,8 +81,8 @@ select_recipe_workspace() {
   [[ "${workspace_root_real}" == "${workspace_root}" ]] \
     || recipe_workspace_die "${workspace_root} resolves outside the recipe workspace namespace"
 
-  echo "myCodex: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
-  echo "myCodex: each workspace name gets a separate project, container, and Codex state volume." >&2
+  echo "myCodexACP: invoked from the recipe directory; the recipe itself will not be mounted into Codex." >&2
+  echo "myCodexACP: each workspace name gets a separate project, container, and Codex state volume." >&2
   if { : < /dev/tty > /dev/tty; } 2>/dev/null; then
     while :; do
       printf 'Workspace name [%s]: ' "${RECIPE_WORKSPACE_DEFAULT}" > /dev/tty
@@ -91,11 +91,11 @@ select_recipe_workspace() {
       if recipe_workspace_name_is_valid "${workspace_name}"; then
         break
       fi
-      echo "myCodex: use 1-63 lowercase letters, digits, '_' or '-'; start and end with a letter or digit." > /dev/tty
+      echo "myCodexACP: use 1-63 lowercase letters, digits, '_' or '-'; start and end with a letter or digit." > /dev/tty
     done
   else
     workspace_name="${RECIPE_WORKSPACE_DEFAULT}"
-    echo "myCodex: no interactive terminal; using default workspace '${workspace_name}'." >&2
+    echo "myCodexACP: no interactive terminal; using default workspace '${workspace_name}'." >&2
   fi
 
   workspace_path="${workspace_root}/${workspace_name}"
@@ -121,9 +121,9 @@ select_recipe_workspace() {
     || recipe_workspace_die "failed to enter workspace ${workspace_path_real}"
   CALLER_DIR="$(pwd -P)"
   if (( created )); then
-    echo "myCodex: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+    echo "myCodexACP: created workspace '${workspace_name}' at ${CALLER_DIR}." >&2
   else
-    echo "myCodex: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
+    echo "myCodexACP: using existing workspace '${workspace_name}' at ${CALLER_DIR}." >&2
   fi
 }
 
@@ -134,18 +134,67 @@ if [[ -n "${LITELLM_MASTER_KEY-}" || -n "${LITELLM_MASTER_KEY_FILE-}" ]]; then
   GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED=1
 fi
 
-# Never bind-mount the recipe root, which contains managed credentials. A launch
-# from that directory is redirected into a named child of .workspaces instead.
-if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]]; then
+# Commands that operate on a project need a workspace. Authentication and help
+# are recipe-level operations and must not create or select one.
+recipe_command_needs_workspace() {
+  local arg command="" skip_value=0
+
+  for arg in "$@"; do
+    if (( skip_value )); then
+      skip_value=0
+      continue
+    fi
+    case "${arg}" in
+      --auth|-v|--volume|-f|--compose-file)
+        skip_value=1
+        ;;
+      --auth=*|--volume=*|--compose-file=*|--private-env)
+        ;;
+      --)
+        ;;
+      -h|--help)
+        command="${arg}"
+        break
+        ;;
+      -*)
+        return 0
+        ;;
+      *)
+        command="${arg}"
+        break
+        ;;
+    esac
+  done
+
+  case "${command}" in
+    ""|login|logout|auth|help|-h|--help)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+# Never bind-mount the recipe root, which contains managed credentials. A
+# workspace command from that directory is redirected into a confined child.
+if [[ "${CALLER_DIR}" == "${SCRIPT_DIR}" ]] && recipe_command_needs_workspace "$@"; then
   select_recipe_workspace
 fi
 
-unset -f recipe_workspace_name_is_valid recipe_workspace_die select_recipe_workspace
+unset -f recipe_command_needs_workspace recipe_workspace_name_is_valid \
+  recipe_workspace_die select_recipe_workspace
 
 # Local derived image used by this recipe. Compose builds it from the distributed
 # Dockerfile; the exact tag prevents the vendored launcher's registry discovery.
 export MYCODEX_IMAGE_NAME="vaka/codex-acp"
 export MYCODEX_IMAGE_TAG="1.3.0-r1"
+
+# No command is pure help. Keep it independent of Docker, Vaka, profile state,
+# workspace selection, and credential handling.
+if [[ $# -eq 0 ]]; then
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP"
+fi
 
 read_secret_value() {
   local env_name="$1"
@@ -153,18 +202,18 @@ read_secret_value() {
   local env_value
 
   if [[ ! -f "${secret_file}" ]]; then
-    echo "myCodex: ${secret_file} must resolve to a readable regular file for ${env_name}." >&2
+    echo "myCodexACP: ${secret_file} must resolve to a readable regular file for ${env_name}." >&2
     return 2
   fi
   if ! IFS= read -r env_value < "${secret_file}"; then
     # A final line without a newline is a valid one-line secret.
     [[ -n "${env_value}" ]] || {
-      echo "myCodex: failed to read ${env_name} from ${secret_file}." >&2
+      echo "myCodexACP: failed to read ${env_name} from ${secret_file}." >&2
       return 2
     }
   fi
   if [[ -z "${env_value}" ]]; then
-    echo "myCodex: ${secret_file} is empty; ${env_name} is required." >&2
+    echo "myCodexACP: ${secret_file} is empty; ${env_name} is required." >&2
     return 2
   fi
 
@@ -176,24 +225,24 @@ ensure_managed_secrets_dir() {
   local secrets_dir="$2"
 
   if [[ -L "${secrets_dir}" ]]; then
-    echo "myCodex: ${secrets_dir} is a symlink; managed secret storage must be a real directory." >&2
-    echo "myCodex: set ${env_name} or ${env_name}_FILE to use an external secret source." >&2
+    echo "myCodexACP: ${secrets_dir} is a symlink; managed secret storage must be a real directory." >&2
+    echo "myCodexACP: set ${env_name} or ${env_name}_FILE to use an external secret source." >&2
     return 2
   fi
   if [[ -e "${secrets_dir}" ]]; then
     if [[ ! -d "${secrets_dir}" ]]; then
-      echo "myCodex: ${secrets_dir} exists but is not a directory." >&2
+      echo "myCodexACP: ${secrets_dir} exists but is not a directory." >&2
       return 2
     fi
     return
   fi
 
   if ! (umask 077 && mkdir -p -- "${secrets_dir}"); then
-    echo "myCodex: failed to create managed secret directory ${secrets_dir}." >&2
+    echo "myCodexACP: failed to create managed secret directory ${secrets_dir}." >&2
     return 2
   fi
   if [[ -L "${secrets_dir}" || ! -d "${secrets_dir}" ]]; then
-    echo "myCodex: ${secrets_dir} did not resolve to a managed directory after creation." >&2
+    echo "myCodexACP: ${secrets_dir} did not resolve to a managed directory after creation." >&2
     return 2
   fi
 }
@@ -203,12 +252,12 @@ read_managed_secret_value() {
   local secret_file="$2"
 
   if [[ -L "${secret_file}" ]]; then
-    echo "myCodex: ${secret_file} is a symlink; managed secret files must be regular files." >&2
-    echo "myCodex: set ${env_name}_FILE to use an external file, including a symlink." >&2
+    echo "myCodexACP: ${secret_file} is a symlink; managed secret files must be regular files." >&2
+    echo "myCodexACP: set ${env_name}_FILE to use an external file, including a symlink." >&2
     return 2
   fi
   if [[ -e "${secret_file}" && ! -f "${secret_file}" ]]; then
-    echo "myCodex: ${secret_file} exists but is not a regular file." >&2
+    echo "myCodexACP: ${secret_file} exists but is not a regular file." >&2
     return 2
   fi
 
@@ -223,13 +272,13 @@ persist_managed_secret_value() {
   secrets_dir="$(dirname -- "${secret_file}")"
 
   temp_file="$(mktemp "${secrets_dir}/.$(basename -- "${secret_file}").XXXXXX")" || {
-    echo "myCodex: failed to create a temporary file for ${secret_file}." >&2
+    echo "myCodexACP: failed to create a temporary file for ${secret_file}." >&2
     return 2
   }
   chmod 600 "${temp_file}"
   if ! printf '%s\n' "${env_value}" > "${temp_file}"; then
     rm -f -- "${temp_file}"
-    echo "myCodex: failed to write ${secret_file}." >&2
+    echo "myCodexACP: failed to write ${secret_file}." >&2
     return 2
   fi
 
@@ -247,7 +296,7 @@ persist_managed_secret_value() {
     printf '%s' "${winner}"
     return
   fi
-  echo "myCodex: failed to atomically persist ${env_name} in ${secret_file}." >&2
+  echo "myCodexACP: failed to atomically persist ${env_name} in ${secret_file}." >&2
   return 2
 }
 
@@ -256,18 +305,18 @@ prompt_secret_value() {
   local env_value
 
   if ! { : < /dev/tty > /dev/tty; } 2>/dev/null; then
-    echo "myCodex: ${env_name} is not set and no stored value exists; cannot prompt without a tty." >&2
+    echo "myCodexACP: ${env_name} is not set and no stored value exists; cannot prompt without a tty." >&2
     return 2
   fi
   printf 'Enter %s: ' "${env_name}" > /dev/tty
   if ! IFS= read -r -s env_value < /dev/tty; then
     printf '\n' > /dev/tty
-    echo "myCodex: failed to read ${env_name}." >&2
+    echo "myCodexACP: failed to read ${env_name}." >&2
     return 2
   fi
   printf '\n' > /dev/tty
   if [[ -z "${env_value}" ]]; then
-    echo "myCodex: ${env_name} cannot be empty." >&2
+    echo "myCodexACP: ${env_name} cannot be empty." >&2
     return 2
   fi
 
@@ -284,7 +333,7 @@ generate_litellm_proxy_key() {
   fi
 
   if [[ -z "${proxy_key}" ]]; then
-    echo "myCodex: failed to generate LiteLLM proxy key" >&2
+    echo "myCodexACP: failed to generate LiteLLM proxy key" >&2
     exit 2
   fi
 
@@ -302,7 +351,7 @@ resolve_secret_env() {
   local secret_file="${secrets_dir}/${managed_name}"
 
   if [[ -n "${env_value}" && -n "${explicit_file}" ]]; then
-    echo "myCodex: set only one of ${env_name} and ${file_env_name}." >&2
+    echo "myCodexACP: set only one of ${env_name} and ${file_env_name}." >&2
     return 2
   fi
   if [[ -n "${env_value}" ]]; then
@@ -332,7 +381,7 @@ resolve_secret_env() {
       env_value="$(generate_litellm_proxy_key)"
       ;;
     *)
-      echo "myCodex: internal error: unknown secret acquisition policy ${acquisition}." >&2
+      echo "myCodexACP: internal error: unknown secret acquisition policy ${acquisition}." >&2
       return 2
       ;;
   esac
@@ -349,8 +398,8 @@ resolve_gateway_admin_key() {
 
   if (( GATEWAY_ADMIN_KEY_EXTERNALLY_CONFIGURED )); then
     die "LITELLM_MASTER_KEY and LITELLM_MASTER_KEY_FILE are no longer accepted.
-myCodex: older recipes exposed that administrator key to Codex, so it must not be reused.
-myCodex: unset the override; myCodex will generate a sidecar-only replacement automatically."
+myCodexACP: older recipes exposed that administrator key to Codex, so it must not be reused.
+myCodexACP: unset the override; myCodexACP will generate a sidecar-only replacement automatically."
   fi
 
   unset LITELLM_MASTER_KEY LITELLM_MASTER_KEY_FILE
@@ -366,14 +415,14 @@ myCodex: unset the override; myCodex will generate a sidecar-only replacement au
       || die "${legacy_file} is not a regular file; remove it manually"
     rm -f -- "${legacy_file}" \
       || die "failed to remove exposed legacy gateway key ${legacy_file}"
-    echo "myCodex: rotated the legacy LiteLLM administrator key for restricted gateway auth." >&2
+    echo "myCodexACP: rotated the legacy LiteLLM administrator key for restricted gateway auth." >&2
   fi
 
   GATEWAY_ADMIN_KEY_RESOLVED=1
 }
 
 die() {
-  echo "myCodex: $*" >&2
+  echo "myCodexACP: $*" >&2
   exit 2
 }
 
@@ -401,7 +450,7 @@ AUTH_SELECTION_SOURCE=""
 
 # The launcher derives the codex container name deterministically from the
 # caller directory; replicate it so we can inspect a running stack's profile.
-# Keep this in sync with bin/myCodex's PROJECT_NAME/CONTAINER_NAME derivation.
+# Keep this in sync with bin/myCodexACP's PROJECT_NAME/CONTAINER_NAME derivation.
 CODEX_PROJECT_NAME="$(basename -- "${CALLER_DIR}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "${CODEX_PROJECT_NAME}" ]] || CODEX_PROJECT_NAME="workspace"
 CODEX_CONTAINER_NAME="${CODEX_PROJECT_NAME}-codex"
@@ -531,15 +580,15 @@ select_auth_profile_interactively() {
   local choice profile index
 
   if ! has_controlling_tty; then
-    echo "myCodex: no authentication profile is selected; specify one explicitly:" >&2
-    echo "  myCodex login <profile>" >&2
-    echo "myCodex: available profiles:" >&2
+    echo "myCodexACP: no authentication profile is selected; specify one explicitly:" >&2
+    echo "  myCodexACP login <profile>" >&2
+    echo "myCodexACP: available profiles:" >&2
     print_auth_profiles >&2
     return 2
   fi
 
   mapfile -t profiles < <(available_auth_profiles)
-  printf 'Choose how myCodex should authenticate:\n' > /dev/tty
+  printf 'Choose how myCodexACP should authenticate:\n' > /dev/tty
   for index in "${!profiles[@]}"; do
     profile="${profiles[index]}"
     printf '  %d) %-12s %s\n' "$((index + 1))" "${profile}" \
@@ -559,7 +608,7 @@ select_auth_profile_interactively() {
       return
     fi
   done
-  echo "myCodex: unknown authentication profile '${choice}'" >&2
+  echo "myCodexACP: unknown authentication profile '${choice}'" >&2
   return 2
 }
 
@@ -666,8 +715,8 @@ guard_profile_switch() {
     "${CODEX_CONTAINER_NAME}" 2>/dev/null)" || return 0
   [[ -n "${running}" && "${running}" != "${MYCODEX_AUTH}" ]] || return 0
   die "this project is running under auth profile '${running}', not '${MYCODEX_AUTH}'.
-myCodex: ${operation} will not replace containers created for another profile.
-myCodex: run '${SCRIPT_DIR}/myCodex down' first, then retry with '${MYCODEX_AUTH}'."
+myCodexACP: ${operation} will not replace containers created for another profile.
+myCodexACP: run '${SCRIPT_DIR}/myCodexACP down' first, then retry with '${MYCODEX_AUTH}'."
 }
 
 # Import a pre-existing ChatGPT auth.json into the sidecar token dir, normalizing
@@ -717,16 +766,16 @@ PY
 }
 
 launcher() {
-  "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"
+  "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP" "${private_env[@]}" "${profile_files[@]}" "$@"
 }
 
 follow_litellm_logs() {
   local since="$1"
-  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" \
+  exec "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP" \
     "${private_env[@]}" "${profile_files[@]}" logs --since "${since}" --follow litellm
 }
 
-# `myCodex login` primes the selected profile's credential. For env-secret /
+# `myCodexACP login` primes the selected profile's credential. For env-secret /
 # credential-file this just resolves and stores the input; for oauth-device-native
 # it surfaces LiteLLM's own device flow (which mints and later refreshes the
 # token) or imports an existing auth.json via MYCODEX_CHATGPT_AUTH.
@@ -734,11 +783,11 @@ run_login() {
   case "${CREDENTIAL_KIND}" in
     env-secret)
       acquire_credentials
-      echo "myCodex: credentials for profile '${MYCODEX_AUTH}' are configured; nothing else to do." >&2
+      echo "myCodexACP: credentials for profile '${MYCODEX_AUTH}' are configured; nothing else to do." >&2
       ;;
     credential-file)
       acquire_credentials
-      echo "myCodex: profile '${MYCODEX_AUTH}' uses credential file ${MYCODEX_CREDENTIAL_FILE}." >&2
+      echo "myCodexACP: profile '${MYCODEX_AUTH}' uses credential file ${MYCODEX_CREDENTIAL_FILE}." >&2
       ;;
     oauth-device-native)
       run_oauth_device_login
@@ -762,7 +811,7 @@ selected_credential_status() {
       elif [[ -n "${!file_env_name-}" ]]; then
         printf 'provided by %s' "${file_env_name}"
       elif [[ -s "${managed_file}" && ! -L "${managed_file}" ]]; then
-        printf 'stored by myCodex'
+        printf 'stored by myCodexACP'
       elif [[ -e "${managed_file}" || -L "${managed_file}" ]]; then
         printf 'invalid managed credential at %s' "${managed_file}"
       else
@@ -772,7 +821,7 @@ selected_credential_status() {
     oauth-device-native)
       token_file="${SCRIPT_DIR}/.secrets/chatgpt-token/auth.json"
       if chatgpt_auth_complete "${token_file}"; then
-        printf 'token stored by myCodex'
+        printf 'token stored by myCodexACP'
       elif [[ -e "${token_file}" || -L "${token_file}" ]]; then
         printf 'device login incomplete or invalid'
       else
@@ -825,10 +874,10 @@ guard_gateway_auth_migration() {
     [[ "${contract}" == "${GATEWAY_AUTH_CONTRACT}" ]] && continue
 
     die "existing container '${container}' predates restricted gateway authentication and may contain or accept the LiteLLM administrator key.
-myCodex: remove the legacy containers before continuing:
-  ${SCRIPT_DIR}/myCodex down
-myCodex: this keeps the Codex state volume; retry the original command afterwards.
-myCodex: only if retained Codex configuration prevents startup, use '${SCRIPT_DIR}/myCodex down -v' to delete that project's configuration and history."
+myCodexACP: remove the legacy containers before continuing:
+  ${SCRIPT_DIR}/myCodexACP down
+myCodexACP: this keeps the Codex state volume; retry the original command afterwards.
+myCodexACP: only if retained Codex configuration prevents startup, use '${SCRIPT_DIR}/myCodexACP down -v' to delete that project's configuration and history."
   done
 }
 
@@ -853,7 +902,7 @@ run_unselected_auth_status() {
   local running
 
   printf 'Selected profile: none\n'
-  printf 'Authentication:  choose a profile with myCodex login\n'
+  printf 'Authentication:  choose a profile with myCodexACP login\n'
   if running="$(running_auth_profile)" && [[ -n "${running}" ]]; then
     printf 'Running profile: %s\n' "${running}"
   else
@@ -894,7 +943,7 @@ run_logout() {
       fi
       file_env_name="${PROFILE_SECRET_ENV}_FILE"
       if [[ -n "${!PROFILE_SECRET_ENV-}" || -n "${!file_env_name-}" ]]; then
-        echo "myCodex: ${PROFILE_SECRET_ENV} is still supplied externally and was not changed." >&2
+        echo "myCodexACP: ${PROFILE_SECRET_ENV} is still supplied externally and was not changed." >&2
       fi
       ;;
     oauth-device-native)
@@ -909,7 +958,7 @@ run_logout() {
       fi
       ;;
     credential-file)
-      echo "myCodex: profile '${MYCODEX_AUTH}' uses an external credential file; it was not modified." >&2
+      echo "myCodexACP: profile '${MYCODEX_AUTH}' uses an external credential file; it was not modified." >&2
       ;;
     *)
       die "logout is not supported for CREDENTIAL_KIND '${CREDENTIAL_KIND}'"
@@ -918,24 +967,23 @@ run_logout() {
 
   clear_persisted_auth_profile "${MYCODEX_AUTH}"
   if (( removed )); then
-    echo "myCodex: removed the managed credential for profile '${MYCODEX_AUTH}'." >&2
+    echo "myCodexACP: removed the managed credential for profile '${MYCODEX_AUTH}'." >&2
   else
-    echo "myCodex: no managed credential was stored for profile '${MYCODEX_AUTH}'." >&2
+    echo "myCodexACP: no managed credential was stored for profile '${MYCODEX_AUTH}'." >&2
   fi
   if running="$(running_auth_profile)" && [[ "${running}" == "${MYCODEX_AUTH}" ]]; then
-    echo "myCodex: running containers were not changed; bring this project down to end its current session." >&2
+    echo "myCodexACP: running containers were not changed; bring this project down to end its current session." >&2
   fi
 }
 
 print_wrapper_auth_help() {
   cat <<'EOF'
 
-Authentication commands added by the recipe wrapper:
-  myCodex login [profile]           Authenticate and select a persistent profile
-  myCodex logout [profile]          Remove myCodex-managed credentials
-  myCodex auth status               Show selected, stored, and running profiles
-  myCodex auth list                 List available profiles
-  myCodex --auth <profile> ...      Override the profile for one invocation
+Additional authentication commands:
+  myCodexACP logout [profile]          Remove myCodexACP-managed credentials
+  myCodexACP auth status               Show selected, stored, and running profiles
+  myCodexACP auth list                 List available profiles
+  myCodexACP --auth <profile> ...      Override the profile for one invocation
 
 MYCODEX_AUTH remains a one-invocation override for automation. A profile passed
 to `login` is stored only after authentication succeeds.
@@ -963,7 +1011,7 @@ discard_incomplete_chatgpt_auth() {
     || die "${file} must be managed regular-file state, not a symlink or other file"
   chatgpt_auth_complete "${file}" && return 0
   rm -f -- "${file}" || die "failed to discard incomplete ChatGPT login state at ${file}"
-  echo "myCodex: discarded incomplete ChatGPT login state; requesting a new code." >&2
+  echo "myCodexACP: discarded incomplete ChatGPT login state; requesting a new code." >&2
 }
 
 # Resolve the Compose-managed sidecar without depending on its generated name.
@@ -1011,24 +1059,24 @@ restore_litellm_state() {
       return 0
       ;;
     absent)
-      echo "myCodex: removing the temporary LiteLLM login service." >&2
+      echo "myCodexACP: removing the temporary LiteLLM login service." >&2
       launcher rm --stop --force litellm \
-        || echo "myCodex: warning: failed to remove the temporary LiteLLM service." >&2
+        || echo "myCodexACP: warning: failed to remove the temporary LiteLLM service." >&2
       ;;
     paused)
       resolve_litellm_container_id || resolve_status=$?
       if (( resolve_status == 0 )); then
         docker pause "${LITELLM_CONTAINER_ID}" >/dev/null 2>&1 \
-          || echo "myCodex: warning: failed to restore the paused LiteLLM state." >&2
+          || echo "myCodexACP: warning: failed to restore the paused LiteLLM state." >&2
       fi
       ;;
     created|exited|dead)
-      echo "myCodex: restoring the LiteLLM service to a stopped state." >&2
+      echo "myCodexACP: restoring the LiteLLM service to a stopped state." >&2
       launcher stop litellm \
-        || echo "myCodex: warning: failed to stop the LiteLLM login service." >&2
+        || echo "myCodexACP: warning: failed to stop the LiteLLM login service." >&2
       ;;
     *)
-      echo "myCodex: warning: prior LiteLLM state was '${LOGIN_LITELLM_PRIOR_STATE}'; leaving the service unchanged." >&2
+      echo "myCodexACP: warning: prior LiteLLM state was '${LOGIN_LITELLM_PRIOR_STATE}'; leaving the service unchanged." >&2
       ;;
   esac
 }
@@ -1083,7 +1131,7 @@ wait_for_litellm_ready() {
 
     if output="$(probe_litellm_ready "${container_id}" "${request_timeout}" 2>&1)"; then
       elapsed=$((SECONDS - started))
-      echo "myCodex: LiteLLM ready after ${elapsed}s." >&2
+      echo "myCodexACP: LiteLLM ready after ${elapsed}s." >&2
       return 0
     fi
     output="${output//$'\n'/; }"
@@ -1093,7 +1141,7 @@ wait_for_litellm_ready() {
     if [[ "${LITELLM_READY_ERROR}" != "${last_reported}" \
         || "${SECONDS}" -ge "${next_progress}" ]]; then
       elapsed=$((SECONDS - started))
-      echo "myCodex: LiteLLM not ready after ${elapsed}s: ${LITELLM_READY_ERROR}" >&2
+      echo "myCodexACP: LiteLLM not ready after ${elapsed}s: ${LITELLM_READY_ERROR}" >&2
       last_reported="${LITELLM_READY_ERROR}"
       next_progress=$((SECONDS + 10))
     fi
@@ -1192,7 +1240,7 @@ run_chatgpt_device_flow() (
   follow_litellm_logs "${log_since}" &
   log_pid=$!
 
-  echo "myCodex: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
+  echo "myCodexACP: waiting for the LiteLLM sidecar to accept requests (up to ${ready_timeout}s)..." >&2
   wait_for_litellm_ready "${container_id}" "${ready_timeout}" "${log_pid}" \
     || die "LiteLLM did not become ready within ${ready_timeout}s. Last probe: ${LITELLM_READY_ERROR}"
 
@@ -1201,15 +1249,15 @@ run_chatgpt_device_flow() (
   local remaining probe_status sleep_for
   local request_timeout=$((login_timeout + 5))
 
-  echo "myCodex: LiteLLM is ready; requesting one ChatGPT verification code now." >&2
-  echo "myCodex: when the URL and code appear below, complete browser authorization and MFA within ${login_timeout}s." >&2
-  echo "myCodex: press Ctrl-C to cancel." >&2
+  echo "myCodexACP: LiteLLM is ready; requesting one ChatGPT verification code now." >&2
+  echo "myCodexACP: when the URL and code appear below, complete browser authorization and MFA within ${login_timeout}s." >&2
+  echo "myCodexACP: press Ctrl-C to cancel." >&2
   trigger_chatgpt_device_flow "${container_id}" "${model}" "${request_timeout}"
   probe_pid="${CHATGPT_PROBE_PID}"
 
   while ! chatgpt_auth_complete "${token_file}"; do
     if (( SECONDS >= deadline )); then
-      die "ChatGPT device code expired after ${login_timeout}s; rerun '${SCRIPT_DIR}/myCodex login' to request a new code"
+      die "ChatGPT device code expired after ${login_timeout}s; rerun '${SCRIPT_DIR}/myCodexACP login' to request a new code"
     fi
 
     if ! kill -0 "${probe_pid}" 2>/dev/null; then
@@ -1235,7 +1283,7 @@ run_chatgpt_device_flow() (
 
     if (( SECONDS >= next_status )); then
       remaining=$((deadline - SECONDS))
-      echo "myCodex: still waiting for browser authorization (${remaining}s remaining; Ctrl-C cancels)." >&2
+      echo "myCodexACP: still waiting for browser authorization (${remaining}s remaining; Ctrl-C cancels)." >&2
       next_status=$((SECONDS + 30))
     fi
     remaining=$((deadline - SECONDS))
@@ -1245,7 +1293,7 @@ run_chatgpt_device_flow() (
     sleep "${sleep_for}"
   done
 
-  echo "myCodex: ChatGPT login complete; token stored at ${token_file}." >&2
+  echo "myCodexACP: ChatGPT login complete; token stored at ${token_file}." >&2
 )
 
 run_oauth_device_login() (
@@ -1268,21 +1316,21 @@ run_oauth_device_login() (
 
   if [[ -n "${MYCODEX_CHATGPT_AUTH:-}" ]]; then
     import_chatgpt_auth "${MYCODEX_CHATGPT_AUTH}" "${token_file}"
-    echo "myCodex: imported ChatGPT auth into ${token_file}." >&2
+    echo "myCodexACP: imported ChatGPT auth into ${token_file}." >&2
     return
   fi
 
   if chatgpt_auth_complete "${token_file}"; then
-    echo "myCodex: a ChatGPT token already exists at ${token_file}; nothing to do." >&2
+    echo "myCodexACP: a ChatGPT token already exists at ${token_file}; nothing to do." >&2
     return
   fi
 
-  command -v docker >/dev/null 2>&1 || die "docker is required for 'myCodex login'"
+  command -v docker >/dev/null 2>&1 || die "docker is required for 'myCodexACP login'"
   guard_profile_switch "login"
 
-  echo "myCodex: starting the LiteLLM ChatGPT device login." >&2
-  echo "myCodex: a verification URL and code will appear below — open the URL," >&2
-  echo "myCodex: sign in, and enter the code. This runs once; the token refreshes itself." >&2
+  echo "myCodexACP: starting the LiteLLM ChatGPT device login." >&2
+  echo "myCodexACP: a verification URL and code will appear below — open the URL," >&2
+  echo "myCodexACP: sign in, and enter the code. This runs once; the token refreshes itself." >&2
 
   local model="${MYCODEX_MODEL:-${PROFILE_LOGIN_MODEL:-${PROFILE_DEFAULT_MODEL:-}}}"
   [[ -n "${model}" ]] \
@@ -1297,9 +1345,9 @@ run_oauth_device_login() (
 
   discard_incomplete_chatgpt_auth "${token_file}"
   log_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  echo "myCodex: LiteLLM may print transient startup errors while it initializes." >&2
-  echo "myCodex: keep waiting for the verification URL and code; authentication has failed only if myCodex prints a final error." >&2
-  echo "myCodex: starting only the LiteLLM sidecar for authentication." >&2
+  echo "myCodexACP: LiteLLM may print transient startup errors while it initializes." >&2
+  echo "myCodexACP: keep waiting for the verification URL and code; authentication has failed only if myCodexACP prints a final error." >&2
+  echo "myCodexACP: starting only the LiteLLM sidecar for authentication." >&2
   launcher up -d litellm || die "failed to start the LiteLLM sidecar for login"
 
   resolve_litellm_container_id || container_resolve_status=$?
@@ -1330,13 +1378,36 @@ case "${wrapper_args[0]-}" in
 esac
 set -- "${wrapper_args[@]}"
 
-auth_command="${1:-}"
+# Find the launcher subcommand after its supported global options. The wrapper
+# needs this for lifecycle decisions, but preserves argv byte-for-byte for the
+# internal launcher to parse and validate.
+auth_command_index=0
+while (( auth_command_index < ${#wrapper_args[@]} )); do
+  case "${wrapper_args[auth_command_index]}" in
+    --private-env|--volume=*|--compose-file=*)
+      ((auth_command_index += 1))
+      ;;
+    -v|--volume|-f|--compose-file)
+      ((auth_command_index += 2))
+      ;;
+    --)
+      ((auth_command_index += 1))
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+auth_command="${wrapper_args[auth_command_index]-}"
+auth_command_next="${wrapper_args[auth_command_index + 1]-}"
 auth_command_profile=""
 auth_command_profile_consumed=0
 case "${auth_command}" in
   login|logout)
-    if [[ -n "${2:-}" && "${2}" != -* ]]; then
-      auth_command_profile="${2}"
+    if [[ -n "${auth_command_next}" && "${auth_command_next}" != -* ]]; then
+      auth_command_profile="${auth_command_next}"
       auth_command_profile_consumed=1
     fi
     ;;
@@ -1356,8 +1427,8 @@ case "${auth_command}" in
   help|-h|--help|auth|logout)
     ;;
   *)
-    case "${1:-}" in
-      down|stop|kill|rm|ps|logs|info|config|pull)
+    case "${auth_command}" in
+      down|stop|kill|rm|ps|logs|info|status|config|pull)
         ;;
       *)
         guard_gateway_auth_migration
@@ -1391,7 +1462,7 @@ fi
 
 case "${auth_command}" in
   login)
-    if [[ "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+    if [[ "${auth_command_next}" == "-h" || "${auth_command_next}" == "--help" ]]; then
       print_wrapper_auth_help
       exit 0
     fi
@@ -1403,7 +1474,7 @@ case "${auth_command}" in
     fi
     ;;
   auth)
-    if [[ "${2:-status}" == "help" || "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+    if [[ "${auth_command_next:-status}" == "help" || "${auth_command_next}" == "-h" || "${auth_command_next}" == "--help" ]]; then
       print_wrapper_auth_help
       exit 0
     fi
@@ -1415,17 +1486,19 @@ esac
 if (( ! auth_profile_selected )); then
   case "${auth_command}" in
     auth)
-      case "${2:-status}" in
+      case "${auth_command_next:-status}" in
         status)
-          [[ $# -le 2 ]] || die "auth status accepts no arguments"
+          [[ ${#wrapper_args[@]} -le $((auth_command_index + 2)) ]] \
+            || die "auth status accepts no arguments"
           run_unselected_auth_status
           ;;
         list)
-          [[ $# -le 2 ]] || die "auth list accepts no arguments"
+          [[ ${#wrapper_args[@]} -le $((auth_command_index + 2)) ]] \
+            || die "auth list accepts no arguments"
           run_auth_list
           ;;
         *)
-          die "unknown auth command '${2}'; expected status or list"
+          die "unknown auth command '${auth_command_next}'; expected status or list"
           ;;
       esac
       exit 0
@@ -1452,8 +1525,8 @@ fi
 
 startup_should_authenticate=0
 if (( ! auth_profile_selected )); then
-  case "${1:-}" in
-    ""|stdio|acp|up|start|restart)
+  case "${auth_command}" in
+    up|start|restart)
       if has_controlling_tty; then
         MYCODEX_AUTH="$(select_auth_profile_interactively)"
         AUTH_SELECTION_SOURCE="interactive first-run selection"
@@ -1467,7 +1540,7 @@ if (( ! auth_profile_selected )); then
         auth_profile_selected=1
       else
         die "no authentication profile is selected and input is not a terminal.
-myCodex: run '${SCRIPT_DIR}/myCodex login <profile>' once, or use --auth/MYCODEX_AUTH for this invocation"
+myCodexACP: run '${SCRIPT_DIR}/myCodexACP login <profile>' once, or use --auth/MYCODEX_AUTH for this invocation"
       fi
       ;;
     *)
@@ -1519,37 +1592,41 @@ fi
 # Authentication commands are recipe-level operations, not Compose verbs.
 case "${auth_command}" in
   login)
-    auth_args=("${wrapper_args[@]:1}")
-    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    auth_args=("${wrapper_args[@]:auth_command_index + 1}")
+    (( auth_command_profile_consumed )) \
+      && auth_args=("${wrapper_args[@]:auth_command_index + 2}")
     [[ ${#auth_args[@]} -eq 0 ]] \
       || die "login accepts at most one profile id"
     run_login
     if (( login_should_persist )); then
       persist_auth_profile "${MYCODEX_AUTH}"
-      echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+      echo "myCodexACP: profile '${MYCODEX_AUTH}' is now the selected default." >&2
     fi
     exit 0
     ;;
   logout)
-    auth_args=("${wrapper_args[@]:1}")
-    (( auth_command_profile_consumed )) && auth_args=("${wrapper_args[@]:2}")
+    auth_args=("${wrapper_args[@]:auth_command_index + 1}")
+    (( auth_command_profile_consumed )) \
+      && auth_args=("${wrapper_args[@]:auth_command_index + 2}")
     [[ ${#auth_args[@]} -eq 0 ]] \
       || die "logout accepts at most one profile id"
     run_logout
     exit 0
     ;;
   auth)
-    case "${2:-status}" in
+    case "${auth_command_next:-status}" in
       status)
-        [[ $# -le 2 ]] || die "auth status accepts no arguments"
+        [[ ${#wrapper_args[@]} -le $((auth_command_index + 2)) ]] \
+          || die "auth status accepts no arguments"
         run_auth_status
         ;;
       list)
-        [[ $# -le 2 ]] || die "auth list accepts no arguments"
+        [[ ${#wrapper_args[@]} -le $((auth_command_index + 2)) ]] \
+          || die "auth list accepts no arguments"
         run_auth_list
         ;;
       *)
-        die "unknown auth command '${2}'; expected status or list"
+        die "unknown auth command '${auth_command_next}'; expected status or list"
         ;;
     esac
     exit 0
@@ -1564,24 +1641,24 @@ esac
 if (( startup_should_authenticate )); then
   run_login
   persist_auth_profile "${MYCODEX_AUTH}"
-  echo "myCodex: profile '${MYCODEX_AUTH}' is now the selected default." >&2
+  echo "myCodexACP: profile '${MYCODEX_AUTH}' is now the selected default." >&2
 fi
 
-# Refuse to "activate" a profile that differs from the one already running when
-# the verb cannot recreate containers to apply it. `up` is exempt: it recreates,
-# and is the documented way to switch.
-case "${1:-}" in
-  ""|stdio|acp|start|restart)
-    guard_profile_switch
+# Refuse to address a running stack through a different profile when the command
+# cannot recreate it. Canonical `start` and advanced `up` are exempt because
+# both reconcile the Compose project.
+case "${auth_command}" in
+  stdio|restart)
+    guard_profile_switch "${auth_command}"
     ;;
 esac
 
 # Secrets are only needed for paths that may (re)create the stack. ps/exec,
 # logs, and attach render Compose config without them.
-case "${1:-}" in
-  ""|stdio|acp|up|start|restart)
+case "${auth_command}" in
+  up|start|restart)
     acquire_credentials
     ;;
 esac
 
-exec "${BASH}" "${SCRIPT_DIR}/bin/myCodex" "${private_env[@]}" "${profile_files[@]}" "$@"
+exec "${BASH}" "${SCRIPT_DIR}/bin/myCodexACP" "${private_env[@]}" "${profile_files[@]}" "$@"

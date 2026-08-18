@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression checks for the auth-profile layer in the thin ./myCodex wrapper.
+# Regression checks for the auth-profile layer in the thin ./myCodexACP wrapper.
 set -euo pipefail
 
 RECIPE_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,14 +11,14 @@ RECIPE="${TMP}/recipe"
 # with a real running stack when the profile-switch guard runs `docker inspect`.
 WORKSPACE="${TMP}/proj-${RANDOM}${RANDOM}"
 mkdir -p "${RECIPE}/bin" "${WORKSPACE}"
-cp "${RECIPE_SOURCE}/myCodex" "${RECIPE}/myCodex"
-chmod 755 "${RECIPE}/myCodex"
+cp "${RECIPE_SOURCE}/myCodexACP" "${RECIPE}/myCodexACP"
+chmod 755 "${RECIPE}/myCodexACP"
 cp "${RECIPE_SOURCE}/vaka.yaml" "${RECIPE}/vaka.yaml"
 cp -R "${RECIPE_SOURCE}/auth-profiles" "${RECIPE}/auth-profiles"
 
 # Capturing launcher stub: record argv and the profile-relevant environment.
 # Tolerant of a missing OPENAI_API_KEY (non-openai profiles never set it).
-cat > "${RECIPE}/bin/myCodex" <<'STUB'
+cat > "${RECIPE}/bin/myCodexACP" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 : "${MYCODEX_TEST_CAPTURE:?}"
@@ -34,13 +34,13 @@ printf '%s\n' "$@" > "${MYCODEX_TEST_CAPTURE}.argv"
   printf 'LITELLM_MASTER_KEY_SET=%s\n' "${LITELLM_MASTER_KEY:+yes}"
 } > "${MYCODEX_TEST_CAPTURE}.env"
 STUB
-chmod 755 "${RECIPE}/bin/myCodex"
+chmod 755 "${RECIPE}/bin/myCodexACP"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 run_wrapper() {
   local capture="$1"; shift
-  ( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${capture}" "$@" "${RECIPE}/myCodex" up )
+  ( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${capture}" "$@" "${RECIPE}/myCodexACP" start )
 }
 
 # --- egress invariant: codex block byte-identical across every policy -------
@@ -64,7 +64,7 @@ echo "ok: agent egress block identical across all profile policies"
 default_capture="${TMP}/capture-default"
 run_wrapper "${default_capture}" OPENAI_API_KEY=test-provider-key
 grep -Fq -- '-f' "${default_capture}.argv" && fail "openai profile must not inject a compose overlay"
-grep -Fq 'up' "${default_capture}.argv" || fail "openai launcher did not receive the subcommand"
+grep -Fq 'start' "${default_capture}.argv" || fail "openai launcher did not receive the subcommand"
 grep -Fq "vaka.yaml compose" "${default_capture}.env" || fail "openai did not use the root vaka policy"
 grep -Fxq 'OPENAI_API_KEY_SET=yes' "${default_capture}.env" || fail "openai did not resolve the provider key"
 echo "ok: openai profile injects no overlay and uses the root policy"
@@ -72,17 +72,17 @@ echo "ok: openai profile injects no overlay and uses the root policy"
 # --- persistent selection and explicit override precedence -----------------
 login_output="${TMP}/login-openai.out"
 ( cd "${WORKSPACE}" && env OPENAI_API_KEY=test-provider-key \
-    "${RECIPE}/myCodex" login openai > "${login_output}" 2>&1 )
+    "${RECIPE}/myCodexACP" login openai > "${login_output}" 2>&1 )
 grep -Fq "credentials for profile 'openai' are configured" "${login_output}" \
   || fail "env-secret login reported inaccurate persistence behavior"
 auth_profile_file="${RECIPE}/.secrets/auth_profile"
 [[ "$(<"${auth_profile_file}")" == "openai" ]] \
   || fail "login did not persist the selected profile"
 
-status_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodex" auth status)"
+status_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodexACP" auth status)"
 grep -Fq 'Selected profile: openai (persisted)' <<< "${status_output}" \
   || fail "auth status did not report the persisted profile"
-list_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodex" auth list)"
+list_output="$(cd "${WORKSPACE}" && "${RECIPE}/myCodexACP" auth list)"
 grep -Eq '^\* openai[[:space:]]+OpenAI API key$' <<< "${list_output}" \
   || fail "auth list did not mark the selected profile"
 
@@ -94,7 +94,7 @@ grep -Fq "auth-profiles/chatgpt/overlay.yaml" "${persisted_capture}.argv" \
 
 override_capture="${TMP}/capture-auth-option"
 ( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${override_capture}" \
-    OPENAI_API_KEY=test-provider-key "${RECIPE}/myCodex" --auth openai up )
+    OPENAI_API_KEY=test-provider-key "${RECIPE}/myCodexACP" --auth openai start )
 grep -Fq "vaka.yaml compose" "${override_capture}.env" \
   || fail "--auth did not override the persisted profile"
 [[ "$(<"${auth_profile_file}")" == "chatgpt" ]] \
@@ -107,7 +107,7 @@ run_wrapper "${env_override_capture}" MYCODEX_AUTH=openai OPENAI_API_KEY=test-pr
 
 printf '%s\n' openai > "${auth_profile_file}"
 failed_login_err="${TMP}/failed-login.err"
-if ( cd "${WORKSPACE}" && "${RECIPE}/myCodex" login vertex \
+if ( cd "${WORKSPACE}" && "${RECIPE}/myCodexACP" login vertex \
     > /dev/null 2> "${failed_login_err}" ); then
   fail "vertex login accepted a missing credential file"
 fi
@@ -117,12 +117,12 @@ echo "ok: profile selection persists transactionally with explicit override prec
 
 # --- logout removes only managed state -------------------------------------
 printf '%s\n' managed-provider-key > "${RECIPE}/.secrets/openai_api_key"
-( cd "${WORKSPACE}" && "${RECIPE}/myCodex" logout openai > /dev/null 2>&1 )
+( cd "${WORKSPACE}" && "${RECIPE}/myCodexACP" logout openai > /dev/null 2>&1 )
 [[ ! -e "${RECIPE}/.secrets/openai_api_key" ]] \
   || fail "logout did not remove the managed provider credential"
 [[ ! -e "${auth_profile_file}" ]] \
   || fail "logout did not clear the matching persisted profile"
-echo "ok: logout clears matching myCodex-managed credential and profile state"
+echo "ok: logout clears matching myCodexACP-managed credential and profile state"
 
 # --- chatgpt profile: overlay injected, config/model/policy switched --------
 chatgpt_capture="${TMP}/capture-chatgpt"
@@ -144,12 +144,12 @@ grep -Fxq 'LITELLM_MASTER_KEY_SET=yes' "${chatgpt_capture}.env" \
 [[ -d "${RECIPE}/.secrets/chatgpt-token" ]] || fail "chatgpt profile did not create the token dir"
 echo "ok: chatgpt profile switches overlay/config/policy without forcing Codex's model"
 
-# --- profile-switch guard: no-op when no stack is running ------------------
+# --- canonical start reaches the reconciliating launcher path --------------
 start_capture="${TMP}/capture-start"
 ( cd "${WORKSPACE}" && env MYCODEX_TEST_CAPTURE="${start_capture}" MYCODEX_AUTH=chatgpt \
-    "${RECIPE}/myCodex" start )
+    "${RECIPE}/myCodexACP" start )
 grep -Fxq 'start' "${start_capture}.argv" || fail "start did not reach the launcher when nothing is running"
-echo "ok: profile-switch guard is a no-op when no stack is running"
+echo "ok: canonical start reaches the launcher"
 
 # --- vertex scaffold: credential-file handler ------------------------------
 vertex_err="${TMP}/vertex-missing.err"

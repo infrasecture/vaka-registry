@@ -3,6 +3,7 @@ set -euo pipefail
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+bash "${TEST_DIR}/test_control_surface.sh"
 bash "${TEST_DIR}/test_wrapper.sh"
 bash "${TEST_DIR}/test_migration.sh"
 bash "${TEST_DIR}/test_prestart.sh"

@@ -8,12 +8,13 @@ RECIPE="${TMP}/recipe"
 WORKSPACE="${TMP}/workspace-${RANDOM}"
 PROJECT_NAME="$(basename -- "${WORKSPACE}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
 CONTAINER="${PROJECT_NAME}-codex"
+STATE_VOLUME="${PROJECT_NAME}_codex_state"
 
 cleanup() {
-  if [[ -d "${WORKSPACE}" && -x "${RECIPE}/myCodex" ]]; then
+  if [[ -d "${WORKSPACE}" && -x "${RECIPE}/myCodexACP" ]]; then
     (
       cd "${WORKSPACE}"
-      MYCODEX_AUTH=openai "${RECIPE}/myCodex" down -v
+      MYCODEX_AUTH=openai "${RECIPE}/myCodexACP" down -v
     ) >/dev/null 2>&1 || true
   fi
   rm -rf -- "${TMP}"
@@ -32,14 +33,51 @@ cp -a "${RECIPE_SOURCE}" "${RECIPE}"
 rm -rf -- "${RECIPE}/.secrets" "${RECIPE}/.workspaces"
 mkdir -p "${WORKSPACE}"
 
+# stdio is deliberately attach-only. An ACP client's first connection must not
+# build images, start services, create state, or initiate authentication.
+stdio_before_start_out="${TMP}/stdio-before-start.out"
+stdio_before_start_err="${TMP}/stdio-before-start.err"
+if (
+  cd "${WORKSPACE}"
+  MYCODEX_AUTH=openai "${RECIPE}/myCodexACP" stdio
+) >"${stdio_before_start_out}" 2>"${stdio_before_start_err}"; then
+  fail "stdio succeeded before start"
+fi
+[[ ! -s "${stdio_before_start_out}" ]] \
+  || fail "stdio emitted protocol-unsafe stdout before start"
+grep -Fq "run 'myCodexACP start'" "${stdio_before_start_err}" \
+  || fail "stdio failure did not direct the user to start"
+if docker volume inspect "${STATE_VOLUME}" >/dev/null 2>&1; then
+  fail "stdio created the workspace state volume"
+fi
+if docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+  fail "stdio created the Codex container"
+fi
+echo "ok: stdio before start fails on stderr without creating runtime state"
+
 (
   cd "${WORKSPACE}"
   MYCODEX_AUTH=openai OPENAI_API_KEY=test-only-key \
-    "${RECIPE}/myCodex" up -d
+    "${RECIPE}/myCodexACP" start
 )
 
 cd "${WORKSPACE}"
-python3 - "${RECIPE}/myCodex" "${CONTAINER}" "$(id -u)" <<'PY'
+status_output="$(MYCODEX_AUTH=openai "${RECIPE}/myCodexACP" status)"
+grep -Fq "workspace         ${WORKSPACE}" <<<"${status_output}" \
+  || fail "status did not report the workspace"
+grep -Fq 'profile           openai' <<<"${status_output}" \
+  || fail "status did not report the active profile"
+grep -Fq 'codex container   running' <<<"${status_output}" \
+  || fail "status did not report the Codex container as running"
+grep -Fq 'ACP broker        ready' <<<"${status_output}" \
+  || fail "status did not report the ACP broker as ready"
+grep -Fq 'LiteLLM gateway   running' <<<"${status_output}" \
+  || fail "status did not report LiteLLM as running"
+grep -Fq "state volume      ${STATE_VOLUME} [exists]" <<<"${status_output}" \
+  || fail "status did not report the per-workspace state volume"
+echo "ok: start waits for the broker and status reports the complete stack"
+
+python3 - "${RECIPE}/myCodexACP" "${CONTAINER}" "$(id -u)" <<'PY'
 import json
 import os
 import select
@@ -179,3 +217,15 @@ print(
     "exec relay has no_new_privs"
 )
 PY
+
+MYCODEX_AUTH=openai "${RECIPE}/myCodexACP" stop
+stopped_status="$(MYCODEX_AUTH=openai "${RECIPE}/myCodexACP" status)"
+grep -Fq 'codex container   exited' <<<"${stopped_status}" \
+  || fail "stop did not leave the Codex container stopped"
+grep -Fq 'ACP broker        not ready' <<<"${stopped_status}" \
+  || fail "status reported a broker after stop"
+grep -Fq 'LiteLLM gateway   not running' <<<"${stopped_status}" \
+  || fail "stop did not stop LiteLLM"
+docker volume inspect "${STATE_VOLUME}" >/dev/null 2>&1 \
+  || fail "stop deleted the workspace state volume"
+echo "PASS: canonical start/status/stdio/stop lifecycle retains state"

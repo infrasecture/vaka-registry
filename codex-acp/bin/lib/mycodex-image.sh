@@ -294,7 +294,7 @@ mycodex_resolve_latest_local_image_tag() {
   fi
 
   echo "No local semver image tag found for ${image_name}." >&2
-  echo "Run the build helper, run 'myCodex pull', or set MYCODEX_IMAGE_TAG explicitly." >&2
+  echo "Run the build helper, run 'myCodexACP pull', or set MYCODEX_IMAGE_TAG explicitly." >&2
   return 1
 }
 
