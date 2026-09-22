@@ -96,6 +96,9 @@ async def main():
         with open(config_path, encoding="utf-8") as stream:
             config = yaml.safe_load(stream)
         settings = config.get("general_settings", {})
+        litellm_settings = config.get("litellm_settings", {})
+        if litellm_settings.get("telemetry") is not False:
+            fail(f"{config_path} does not disable LiteLLM telemetry")
         if settings.get("custom_auth") != "litellm_agent_auth.user_api_key_auth":
             fail(f"{config_path} does not select the recipe auth policy")
         if settings.get("custom_auth_run_common_checks") is not True:

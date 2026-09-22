@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Contract test for the pinned LiteLLM ChatGPT Responses adapter."""
 
+import importlib.metadata
 import sys
 
 import litellm
@@ -11,6 +12,7 @@ from litellm.types.router import GenericLiteLLMParams
 
 
 EXPECTED_EFFORTS = {
+    "gpt-6-astra": ("low", "medium", "high", "xhigh", "max"),
     "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max"),
     "gpt-5.6-terra": ("low", "medium", "high", "xhigh", "max"),
     "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
@@ -24,6 +26,10 @@ def fail(message):
 
 
 def main():
+    version = importlib.metadata.version("litellm")
+    if version != "1.101.0":
+        fail(f"LiteLLM version is {version}, expected audited release 1.101.0")
+
     with open(sys.argv[1], encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
 
@@ -105,7 +111,7 @@ def main():
             checked += 1
 
     print(
-        "PASS: pinned LiteLLM routes all five ChatGPT models and preserves "
+        f"PASS: pinned LiteLLM routes all {len(EXPECTED_EFFORTS)} ChatGPT models and preserves "
         f"reasoning plus function/custom/web-search tools ({checked} combinations)"
     )
 

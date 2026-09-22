@@ -147,7 +147,7 @@ unset -f recipe_workspace_name_is_valid recipe_workspace_die select_recipe_works
 # concrete version source; the vendored launcher forwards both values to
 # docker-compose.yaml and skips automatic registry discovery.
 export MYCODEX_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
-export MYCODEX_IMAGE_TAG="0.147.0-r2"
+export MYCODEX_IMAGE_TAG="0.155.1-r1"
 
 read_secret_value() {
   local env_name="$1"

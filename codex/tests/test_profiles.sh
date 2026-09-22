@@ -60,6 +60,17 @@ for policy in "${RECIPE}"/auth-profiles/*/vaka.yaml; do
 done
 echo "ok: agent egress block identical across all profile policies"
 
+# LiteLLM may contact only configured model/auth providers. Its own API,
+# telemetry vendors, and remote model-map source stay outside every allowlist.
+for policy in "${RECIPE}/vaka.yaml" "${RECIPE}"/auth-profiles/*/vaka.yaml; do
+  if grep -Eiq \
+      'api[.]litellm[.]ai|posthog[.]com|sentry[.]io|raw[.]githubusercontent[.]com' \
+      "${policy}"; then
+    fail "${policy} allows a LiteLLM telemetry or remote-metadata destination"
+  fi
+done
+echo "ok: LiteLLM telemetry and remote-metadata destinations are denied"
+
 # --- default (openai) profile: no overlay, root policy ---------------------
 default_capture="${TMP}/capture-default"
 run_wrapper "${default_capture}" OPENAI_API_KEY=test-provider-key

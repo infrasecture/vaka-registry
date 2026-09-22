@@ -7,6 +7,10 @@ from pathlib import Path
 import subprocess
 
 recipe_dir = Path(__file__).resolve().parent.parent
+EXPECTED_LITELLM_IMAGE = (
+    "docker.litellm.ai/berriai/litellm:v1.101.0@"
+    "sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b"
+)
 
 
 def render(overlays=None, extra_env=None, image_contract=True):
@@ -75,9 +79,47 @@ def assert_credential_boundary(compose, profile):
         raise SystemExit(f"FAIL: {profile} LiteLLM does not mount the agent auth policy")
 
 
+def assert_litellm_privacy_contract(compose, profile):
+    service = compose["services"]["litellm"]
+    if service.get("image") != EXPECTED_LITELLM_IMAGE:
+        raise SystemExit(
+            f"FAIL: {profile} LiteLLM image is {service.get('image')!r}, "
+            f"want audited upstream release {EXPECTED_LITELLM_IMAGE!r}"
+        )
+    command = service.get("command") or []
+    try:
+        telemetry_value = command[command.index("--telemetry") + 1]
+    except (ValueError, IndexError) as exc:
+        raise SystemExit(f"FAIL: {profile} LiteLLM command does not disable telemetry") from exc
+    if str(telemetry_value).lower() != "false":
+        raise SystemExit(f"FAIL: {profile} LiteLLM command enables telemetry")
+    environment = service.get("environment", {})
+    expected = {
+        "LITELLM_DONT_SHOW_FEEDBACK_BOX": "true",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+        "OTEL_SDK_DISABLED": "true",
+    }
+    for name, value in expected.items():
+        if environment.get(name) != value:
+            raise SystemExit(
+                f"FAIL: {profile} LiteLLM {name} is {environment.get(name)!r}, want {value!r}"
+            )
+    forbidden = {
+        "POSTHOG_API_KEY",
+        "SENTRY_DSN",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    }
+    inherited = sorted(forbidden.intersection(environment))
+    if inherited:
+        raise SystemExit(
+            f"FAIL: {profile} LiteLLM exposes telemetry destination variables: {inherited}"
+        )
+
+
 # --- default (openai) profile: the CI-audited artifact --------------------
 compose = render()
 assert_credential_boundary(compose, "openai")
+assert_litellm_privacy_contract(compose, "openai")
 
 codex_image = compose.get("services", {}).get("codex", {}).get("image")
 expected_codex_image = "registry.invalid/mycodex-contract-test:9.8.7-r6"
@@ -135,6 +177,7 @@ chatgpt = render(
     },
 )
 assert_credential_boundary(chatgpt, "chatgpt")
+assert_litellm_privacy_contract(chatgpt, "chatgpt")
 if codex_label(chatgpt, "agent.vaka.codex.auth-profile") != "chatgpt":
     raise SystemExit("FAIL: chatgpt render did not stamp the chatgpt profile label")
 if not has_mount(chatgpt["services"]["litellm"], "/var/lib/litellm/chatgpt-token"):
@@ -159,6 +202,7 @@ vertex = render(
     },
 )
 assert_credential_boundary(vertex, "vertex")
+assert_litellm_privacy_contract(vertex, "vertex")
 if not has_mount(vertex["services"]["litellm"], "/etc/vaka/credentials/vertex.json"):
     raise SystemExit("FAIL: vertex overlay does not mount the credential file into litellm")
 vx_env = vertex["services"]["litellm"].get("environment", {})

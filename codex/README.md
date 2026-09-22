@@ -272,16 +272,18 @@ number of seconds.
 
 #### Models, reasoning, and tools
 
-The ChatGPT profile does not force a default model. Codex selects the current
-default from the catalog bundled with the workstation image, and a model chosen
+The ChatGPT profile does not force a persistent model override. The bundled
+Codex 0.155.1 catalog selects `gpt-6-astra` as its default, while a model chosen
 inside Codex remains the user's choice. Set `MYCODEX_MODEL` only when an
-explicit per-invocation pin is wanted.
+explicit per-invocation pin is wanted. Device login also uses `gpt-6-astra`, so
+first-run authentication exercises the same route as a fresh default session.
 
 The profile routes the complete model set exposed by the Codex release bundled
 in the selected workstation image for this backend:
 
 | Model | Codex reasoning choices |
 | --- | --- |
+| `gpt-6-astra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `gpt-5.6-terra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `gpt-5.6-luna` | `low`, `medium`, `high`, `xhigh`, `max` |
@@ -355,7 +357,14 @@ concrete tag is defined once by the wrapper and forwarded through the vendored
 launcher to Compose. This lets Docker select the native platform image
 consistently on Linux and VM-backed macOS engines such as Colima. A revision can
 advance workstation content while retaining the same bundled Codex version.
-The LiteLLM image remains digest-pinned.
+The LiteLLM sidecar is the unmodified upstream BerriAI `v1.101.0` release,
+pinned by its multi-architecture digest. No recipe fork or patch layer is used.
+The CLI flag and every provider config disable LiteLLM telemetry, OpenTelemetry
+is disabled, and the feedback prompt is suppressed. The sidecar uses the model
+metadata packaged in that immutable release instead of fetching the mutable
+cost map from GitHub at startup. LiteLLM's own API and telemetry destinations
+are absent from every Vaka egress allowlist, so the network policy independently
+enforces that only configured model and authentication providers are reachable.
 
 The Compose file deliberately falls back to an unusable `invalid.invalid`
 image reference when the wrapper-provided image variables are absent. This
@@ -438,7 +447,9 @@ resolution; `test_migration.sh` covers legacy-container blocking and key
 rotation; `test_onboarding.py` exercises the real pseudo-terminal first-run
 chooser, ChatGPT continuation, and headless behavior; `test_profiles.sh` covers
 profile state and precedence, dispatch, the identical-agent-egress invariant,
-and credential handlers; `test_login.sh` covers sidecar scope, early log
+telemetry-destination denial, and credential handlers; `test_login.sh` covers sidecar scope, early log
 visibility, readiness diagnostics, timeouts, and process/service cleanup.
-`test_compose.py` renders every profile, and `test_gateway_auth.sh` exercises the
-auth policy against the pinned LiteLLM image; these tests require Docker.
+`test_compose.py` renders every profile and pins the proxy privacy controls;
+`test_gateway_auth.sh` starts the pinned LiteLLM image with no network, rejects
+unexpected telemetry/metadata initialization, and exercises the auth policy.
+These tests require Docker.

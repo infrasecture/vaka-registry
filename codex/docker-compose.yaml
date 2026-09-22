@@ -65,7 +65,9 @@ services:
       - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e
+    # Unmodified upstream BerriAI release: the SemVer tag names the audited
+    # version and the manifest-list digest keeps both amd64 and arm64 immutable.
+    image: docker.litellm.ai/berriai/litellm:v1.101.0@sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b
     init: true
     labels:
       agent.vaka.codex.gateway-auth: restricted-v1
@@ -78,6 +80,9 @@ services:
       NO_DOCS: "True"
       NO_REDOC: "True"
       LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
+      # Use the model metadata packaged in the pinned release. This prevents
+      # LiteLLM's otherwise automatic startup fetch from GitHub.
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
       OTEL_SDK_DISABLED: "true"
     volumes:
       # Default resolves to the openai config; auth profiles point this at their

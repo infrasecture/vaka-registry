@@ -348,7 +348,7 @@ output="$(run_login success 5 30 2>&1)" \
   || fail "login rejected a completed device flow: ${output}"
 grep -Fq 'ChatGPT login complete' <<< "${output}" || fail "success was not reported"
 [[ "$(request_count)" == "1" ]] || fail "successful device flow used more than one request"
-grep -Fxq 'gpt-5.6-sol' "${MODELS}" \
+grep -Fxq 'gpt-6-astra' "${MODELS}" \
   || fail "device login did not use the profile's dedicated login model"
 [[ -f "${LOG_CLEANED}" ]] || fail "log follower survived successful login"
 [[ -f "${PROBE_CLEANED}" ]] || fail "provider request survived successful login"
