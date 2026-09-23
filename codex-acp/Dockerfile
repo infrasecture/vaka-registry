@@ -1,7 +1,7 @@
 ARG NODE_VERSION=24.19.0
 FROM node:${NODE_VERSION}-bookworm-slim AS node-runtime
 
-FROM ghcr.io/infrasecture/harness-workstation:0.147.0-r2
+FROM ghcr.io/infrasecture/harness-workstation:0.155.1-r1
 
 USER root
 COPY --from=node-runtime /usr/local/ /usr/local/

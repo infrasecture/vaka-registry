@@ -14,7 +14,9 @@ litellm_image="$(
 [[ -n "${litellm_image}" ]] \
   || { echo "FAIL: could not resolve the pinned LiteLLM image" >&2; exit 1; }
 
-docker run --rm --entrypoint python \
+docker run --rm --network none --entrypoint python \
+  -e LITELLM_LOCAL_MODEL_COST_MAP=True \
+  -e OTEL_SDK_DISABLED=true \
   --mount "type=bind,src=${CONFIG_FILE},dst=/test/config.yaml,readonly" \
   --mount "type=bind,src=${TEST_FILE},dst=/test/test_chatgpt_gateway.py,readonly" \
   "${litellm_image}" /test/test_chatgpt_gateway.py /test/config.yaml

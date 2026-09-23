@@ -43,9 +43,12 @@ cleanup() {
 trap cleanup EXIT
 
 docker run -d --rm --name "${container}" \
+  --network none \
   -e LITELLM_MASTER_KEY=test-gateway-master \
   -e MYCODEX_GATEWAY_TOKEN=mycodex-agent-v1 \
   -e OPENAI_API_KEY=test-provider-key \
+  -e LITELLM_LOCAL_MODEL_COST_MAP=True \
+  -e OTEL_SDK_DISABLED=true \
   --mount "type=bind,src=${RECIPE_SOURCE}/litellm.config.yaml,dst=/app/config.yaml,readonly" \
   --mount "type=bind,src=${AUTH_FILE},dst=/app/litellm_agent_auth.py,readonly" \
   "${litellm_image}" --config /app/config.yaml --telemetry False >/dev/null
@@ -64,6 +67,14 @@ done
 if (( ! ready )); then
   docker logs "${container}" >&2
   echo "FAIL: pinned LiteLLM did not become ready with the auth policy" >&2
+  exit 1
+fi
+
+startup_logs="$(docker logs "${container}" 2>&1)"
+if grep -Eiq 'api[.]litellm[.]ai|raw[.]githubusercontent[.]com|posthog|sentry' \
+    <<< "${startup_logs}"; then
+  echo "${startup_logs}" >&2
+  echo "FAIL: pinned LiteLLM attempted or initialized an external telemetry/metadata path" >&2
   exit 1
 fi
 
@@ -92,4 +103,4 @@ else:
     raise SystemExit("agent credential reached a LiteLLM management route")
 '
 
-echo "PASS: pinned LiteLLM enforces the agent route boundary at runtime"
+echo "PASS: pinned LiteLLM starts offline and enforces the agent route boundary at runtime"

@@ -65,7 +65,10 @@ services:
       - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e
+    # Unmodified upstream BerriAI pre-release: the SemVer tag names the audited
+    # build and the manifest-list digest keeps both amd64 and arm64 immutable.
+    # This is the first published build with GPT-6 Sol and Luna metadata.
+    image: docker.litellm.ai/berriai/litellm:v1.104.0-dev.1@sha256:3def0387871a732a6d18b009576c4bf4313c54d448fa938a58f51cf189d1fa33
     init: true
     labels:
       agent.vaka.codex.gateway-auth: restricted-v1
@@ -78,6 +81,9 @@ services:
       NO_DOCS: "True"
       NO_REDOC: "True"
       LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
+      # Use the model metadata packaged in the pinned release. This prevents
+      # LiteLLM's otherwise automatic startup fetch from GitHub.
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
       OTEL_SDK_DISABLED: "true"
     volumes:
       # Default resolves to the openai config; auth profiles point this at their
