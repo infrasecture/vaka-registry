@@ -129,7 +129,7 @@ if response.get("result", {}).get("agentInfo", {}).get("name") != (
 ):
     proc.terminate()
     raise SystemExit("FAIL: response did not come from codex-acp")
-if response.get("result", {}).get("agentInfo", {}).get("version") != "1.12.0":
+if response.get("result", {}).get("agentInfo", {}).get("version") != "1.13.1":
     proc.terminate()
     raise SystemExit(f"FAIL: unexpected ACP adapter version: {response!r}")
 auth_ids = {

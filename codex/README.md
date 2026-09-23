@@ -272,17 +272,17 @@ number of seconds.
 
 #### Models, reasoning, and tools
 
-The ChatGPT profile does not force a persistent model override. The bundled
-Codex 0.155.1 catalog selects `gpt-6-astra` as its default, while a model chosen
-inside Codex remains the user's choice. Set `MYCODEX_MODEL` only when an
-explicit per-invocation pin is wanted. Device login also uses `gpt-6-astra`, so
+The OpenAI and ChatGPT profiles default to `gpt-6-sol`. Set `MYCODEX_MODEL` to
+override that choice for an invocation, for example
+`MYCODEX_MODEL=gpt-6-luna ./myCodex`. Device login also uses `gpt-6-sol`, so
 first-run authentication exercises the same route as a fresh default session.
 
-The profile routes the complete model set exposed by the Codex release bundled
-in the selected workstation image for this backend:
+The ChatGPT gateway explicitly routes the following models:
 
 | Model | Codex reasoning choices |
 | --- | --- |
+| `gpt-6-sol` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-6-luna` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `gpt-6-astra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `gpt-5.6-terra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
@@ -357,8 +357,11 @@ concrete tag is defined once by the wrapper and forwarded through the vendored
 launcher to Compose. This lets Docker select the native platform image
 consistently on Linux and VM-backed macOS engines such as Colima. A revision can
 advance workstation content while retaining the same bundled Codex version.
-The LiteLLM sidecar is the unmodified upstream BerriAI `v1.101.0` release,
-pinned by its multi-architecture digest. No recipe fork or patch layer is used.
+The LiteLLM sidecar is the unmodified upstream BerriAI
+`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest. It is the
+first published upstream image whose packaged model map includes GPT-6 Sol and
+Luna. No recipe fork or patch layer is used. Replace it with the first suitable
+stable release after the same gateway tests pass.
 The CLI flag and every provider config disable LiteLLM telemetry, OpenTelemetry
 is disabled, and the feedback prompt is suppressed. The sidecar uses the model
 metadata packaged in that immutable release instead of fetching the mutable

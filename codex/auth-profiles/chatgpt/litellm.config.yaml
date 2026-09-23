@@ -4,6 +4,14 @@
 # because the chatgpt/ provider does not support a wildcard route; the
 # model_name each client requests must appear here.
 model_list:
+  - model_name: gpt-6-sol
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-6-sol
+  - model_name: gpt-6-luna
+    model_info: { mode: responses }
+    litellm_params:
+      model: chatgpt/gpt-6-luna
   - model_name: gpt-6-astra
     model_info: { mode: responses }
     litellm_params:

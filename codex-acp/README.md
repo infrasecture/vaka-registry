@@ -130,17 +130,15 @@ sidecar. The Codex container receives the fixed, route-restricted
 
 ## Models
 
-The ChatGPT profile does not write a persistent model override. The Codex 0.154
-release bundled by `codex-acp` 1.12.0 exposes `gpt-6-astra` first and uses it as
-the default for fresh sessions; device login uses the same route. Explicit user
-choices remain intact, and **MYCODEX_MODEL** is still available for a one-run
-pin.
+The OpenAI and ChatGPT profiles default to `gpt-6-sol`; device login uses the
+same route. Set **MYCODEX_MODEL** for an invocation to select another model,
+for example `MYCODEX_MODEL=gpt-6-luna ./myCodexACP start`.
 
-The gateway routes `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna`, `gpt-5.5`, and `gpt-5.2`. Astra supports wire-level reasoning
-efforts `low`, `medium`, `high`, `xhigh`, and `max`; Codex also presents its
-`ultra` orchestration mode, which uses `max` upstream with automatic task
-delegation.
+The gateway routes `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6-sol`,
+`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, and `gpt-5.2`. GPT-6 Sol, Luna, and
+Astra support wire-level reasoning efforts `low`, `medium`, `high`, `xhigh`,
+and `max`. Codex also presents `ultra` for Sol and Astra; that orchestration
+mode uses `max` upstream with automatic task delegation.
 
 ## Why the broker exists
 
@@ -188,18 +186,21 @@ The recipe intentionally distributes a normal Dockerfile:
 - it builds on **ghcr.io/infrasecture/harness-workstation:0.155.1-r1**;
 - it copies Node **24.19.0** from the official semver-tagged Node image because
   current adapter dependencies require Node 20 or newer;
-- package.json pins **@agentclientprotocol/codex-acp** to **1.12.0**;
+- package.json pins **@agentclientprotocol/codex-acp** to **1.13.1**;
 - package-lock.json locks its graph, including the compatible
-  **@openai/codex** package shipped by the adapter;
+  **@openai/codex 0.156.1** package shipped by the adapter;
 - **npm ci --omit=dev** runs during image build.
 
 This keeps installation in the standard, cacheable image-build phase. Runtime
 does not need npm-registry egress and does not execute mutable **npx -y**
 resolution on every client launch.
 
-The LiteLLM sidecar is the unmodified upstream BerriAI `v1.101.0` release,
-pinned by its multi-architecture digest; there is no recipe fork or patch
-layer. The CLI and all provider configs disable LiteLLM telemetry,
+The LiteLLM sidecar is the unmodified upstream BerriAI
+`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest. It is the
+first published upstream image whose packaged model map includes GPT-6 Sol and
+Luna; there is no recipe fork or patch layer. Replace it with the first suitable
+stable release after the same gateway tests pass. The CLI and all provider
+configs disable LiteLLM telemetry,
 OpenTelemetry is disabled, the feedback prompt is suppressed, and the packaged
 model map is used without a startup fetch. LiteLLM API, telemetry, and remote
 model-map destinations are excluded from every Vaka egress allowlist.

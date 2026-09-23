@@ -15,4 +15,4 @@ env:
     description: Model provider API key consumed only by LiteLLM in the openai profile; myCodexACP also accepts OPENAI_API_KEY_FILE or prompts securely after that profile is selected
   - name: MYCODEX_MODEL
     required: false
-    description: Optional explicit model pin passed to Codex ACP; the OpenAI and ChatGPT profiles otherwise leave selection to Codex, while experimental profiles may define their own default
+    description: Optional model override passed to Codex ACP; the OpenAI and ChatGPT profiles default to gpt-6-sol, while experimental profiles may define another default

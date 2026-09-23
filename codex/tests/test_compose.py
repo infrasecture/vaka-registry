@@ -8,8 +8,8 @@ import subprocess
 
 recipe_dir = Path(__file__).resolve().parent.parent
 EXPECTED_LITELLM_IMAGE = (
-    "docker.litellm.ai/berriai/litellm:v1.101.0@"
-    "sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b"
+    "docker.litellm.ai/berriai/litellm:v1.104.0-dev.1@"
+    "sha256:3def0387871a732a6d18b009576c4bf4313c54d448fa938a58f51cf189d1fa33"
 )
 
 
@@ -84,7 +84,7 @@ def assert_litellm_privacy_contract(compose, profile):
     if service.get("image") != EXPECTED_LITELLM_IMAGE:
         raise SystemExit(
             f"FAIL: {profile} LiteLLM image is {service.get('image')!r}, "
-            f"want audited upstream release {EXPECTED_LITELLM_IMAGE!r}"
+            f"want audited upstream build {EXPECTED_LITELLM_IMAGE!r}"
         )
     command = service.get("command") or []
     try:

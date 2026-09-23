@@ -78,7 +78,9 @@ grep -Fq -- '-f' "${default_capture}.argv" && fail "openai profile must not inje
 grep -Fq 'up' "${default_capture}.argv" || fail "openai launcher did not receive the subcommand"
 grep -Fq "vaka.yaml compose" "${default_capture}.env" || fail "openai did not use the root vaka policy"
 grep -Fxq 'OPENAI_API_KEY_SET=yes' "${default_capture}.env" || fail "openai did not resolve the provider key"
-echo "ok: openai profile injects no overlay and uses the root policy"
+grep -Fxq 'MYCODEX_MODEL=gpt-6-sol' "${default_capture}.env" \
+  || fail "openai profile did not select GPT-6 Sol by default"
+echo "ok: openai profile injects no overlay, uses the root policy, and defaults to GPT-6 Sol"
 
 # --- persistent selection and explicit override precedence -----------------
 login_output="${TMP}/login-openai.out"
@@ -144,16 +146,16 @@ grep -Fq "auth-profiles/chatgpt/vaka.yaml compose" "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not select its egress policy"
 grep -Fq "auth-profiles/chatgpt/litellm.config.yaml" "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not select its litellm config"
-grep -Fxq 'MYCODEX_MODEL=' "${chatgpt_capture}.env" \
-  || fail "chatgpt profile unexpectedly pinned a default model"
-grep -Fxq 'MYCODEX_LEGACY_MODEL=gpt-5.3-codex' "${chatgpt_capture}.env" \
-  || fail "chatgpt profile did not request migration of its old generated pin"
+grep -Fxq 'MYCODEX_MODEL=gpt-6-sol' "${chatgpt_capture}.env" \
+  || fail "chatgpt profile did not select GPT-6 Sol by default"
+grep -Fxq 'MYCODEX_LEGACY_MODEL=' "${chatgpt_capture}.env" \
+  || fail "chatgpt profile exported a legacy migration hint alongside its default"
 grep -Fxq 'OPENAI_API_KEY_SET=' "${chatgpt_capture}.env" \
   || fail "chatgpt profile must not require OPENAI_API_KEY"
 grep -Fxq 'LITELLM_MASTER_KEY_SET=yes' "${chatgpt_capture}.env" \
   || fail "chatgpt profile did not mint the sidecar administrator key"
 [[ -d "${RECIPE}/.secrets/chatgpt-token" ]] || fail "chatgpt profile did not create the token dir"
-echo "ok: chatgpt profile switches overlay/config/policy without forcing Codex's model"
+echo "ok: chatgpt profile switches overlay/config/policy and defaults to GPT-6 Sol"
 
 # --- profile-switch guard: no-op when no stack is running ------------------
 start_capture="${TMP}/capture-start"
