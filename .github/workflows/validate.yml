@@ -25,6 +25,14 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install pyyaml
 
+      - name: Validate LiteLLM builds and offline gateway contracts
+        run: |
+          python3 codex/tests/test_launcher_build.py
+          for recipe in codex codex-acp; do
+            python3 "$recipe/tests/test_compose.py"
+            bash "$recipe/tests/test_chatgpt_gateway.sh"
+          done
+
       - name: Check out vaka source
         uses: actions/checkout@v4
         with:
