@@ -1,8 +1,43 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: RegistryIndex
-generated: '2026-09-21T21:18:00Z'
+generated: '2026-09-25T11:37:04Z'
 recipes:
   codex:
+  - version: 0.3.3
+    description: Codex agent in an egress-restricted container with a LiteLLM gateway
+      sidecar
+    tags:
+    - agent
+    - openai
+    - codex
+    - litellm
+    - chatgpt
+    created: '2026-09-25T11:37:04Z'
+    digest: sha256:0856f498c664a415ab414737d9ecea857323a9c10f9a7c187117281ad76abb73
+    urls:
+    - https://github.com/infrasecture/vaka-registry/releases/download/codex-0.3.3/codex-0.3.3.tar.gz
+    minVakaVersion: 0.0.3
+    env:
+    - name: MYCODEX_AUTH
+      required: false
+      description: One-invocation auth-profile override for automation; interactive
+        first startup or myCodex login selects and persists chatgpt, openai, or vertex
+    - name: OPENAI_API_KEY
+      required: false
+      description: Model provider API key consumed only by LiteLLM in the openai profile;
+        myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile
+        is selected
+    - name: MYCODEX_MODEL
+      required: false
+      description: Optional model override passed to Codex; the OpenAI and ChatGPT
+        profiles default to gpt-6-sol, while experimental profiles may define another
+        default
+    policy:
+      defaultActions:
+        codex: reject
+        litellm: reject
+      riskFlags:
+      - codex:unpinned-image
   - version: 0.3.2
     description: Codex agent in an egress-restricted container with a LiteLLM gateway
       sidecar
@@ -140,33 +175,6 @@ recipes:
         litellm: reject
       riskFlags:
       - codex:unpinned-image
-  - version: 0.2.3
-    description: Codex agent in an egress-restricted container with a LiteLLM gateway
-      sidecar
-    tags:
-    - agent
-    - openai
-    - codex
-    - litellm
-    created: '2026-08-03T21:15:55Z'
-    digest: sha256:79b20d4b8c929737e0a34b4d9befd59aee83e9f252445f05853ecd665346bdca
-    urls:
-    - https://github.com/infrasecture/vaka-registry/releases/download/codex-0.2.3/codex-0.2.3.tar.gz
-    minVakaVersion: 0.0.3
-    env:
-    - name: OPENAI_API_KEY
-      required: true
-      description: Model provider API key consumed only by LiteLLM; myCodex also accepts
-        OPENAI_API_KEY_FILE or prompts securely
-    - name: LITELLM_MASTER_KEY
-      required: false
-      description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE
-        or generates and persists one
-    policy:
-      defaultActions:
-        codex: reject
-        litellm: reject
-      riskFlags: []
   codex-acp:
   - version: 0.3.1
     description: Codex ACP agent over stdio with per-workspace isolation and restricted
