@@ -1,6 +1,6 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: RegistryIndex
-generated: '2026-09-25T11:37:04Z'
+generated: '2026-09-25T11:37:44Z'
 recipes:
   codex:
   - version: 0.3.3
@@ -176,6 +176,42 @@ recipes:
       riskFlags:
       - codex:unpinned-image
   codex-acp:
+  - version: 0.3.2
+    description: Codex ACP agent over stdio with per-workspace isolation and restricted
+      egress
+    tags:
+    - agent
+    - acp
+    - openai
+    - codex
+    - litellm
+    - chatgpt
+    created: '2026-09-25T11:37:44Z'
+    digest: sha256:125713cd7d4361f458914f7a9e852888adefd249e921df11d9025c3d5dcbb8ac
+    urls:
+    - https://github.com/infrasecture/vaka-registry/releases/download/codex-acp-0.3.2/codex-acp-0.3.2.tar.gz
+    minVakaVersion: 0.0.3
+    env:
+    - name: MYCODEX_AUTH
+      required: false
+      description: One-invocation auth-profile override for automation; interactive
+        default startup selects and persists chatgpt, openai, or vertex
+    - name: OPENAI_API_KEY
+      required: false
+      description: Model provider API key consumed only by LiteLLM in the openai profile;
+        myCodexACP also accepts OPENAI_API_KEY_FILE or prompts securely after that
+        profile is selected
+    - name: MYCODEX_MODEL
+      required: false
+      description: Optional model override passed to Codex ACP; the OpenAI and ChatGPT
+        profiles default to gpt-6-sol, while experimental profiles may define another
+        default
+    policy:
+      defaultActions:
+        codex: reject
+        litellm: reject
+      riskFlags:
+      - codex:unpinned-image
   - version: 0.3.1
     description: Codex ACP agent over stdio with per-workspace isolation and restricted
       egress
