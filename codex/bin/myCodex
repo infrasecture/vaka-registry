@@ -659,7 +659,7 @@ start_stack() {
     compose_run config >/dev/null
   fi
 
-  compose_run --resolve-local-image-tag up -d --no-build
+  compose_run --resolve-local-image-tag up -d --build
   wait_for_container_ready
 }
 
@@ -686,7 +686,7 @@ run_up() {
     if has_arg --build "${args[@]}" || has_arg --no-build "${args[@]}"; then
       compose_run --resolve-local-image-tag up "${args[@]}"
     else
-      compose_run --resolve-local-image-tag up --no-build "${args[@]}"
+      compose_run --resolve-local-image-tag up --build "${args[@]}"
     fi
     wait_for_container_ready
     return
@@ -695,7 +695,7 @@ run_up() {
   if has_arg --build "$@" || has_arg --no-build "$@"; then
     compose --resolve-local-image-tag up "$@"
   else
-    compose --resolve-local-image-tag up --no-build "$@"
+    compose --resolve-local-image-tag up --build "$@"
   fi
 }
 
@@ -844,7 +844,7 @@ case "${subcommand}" in
       if has_arg --build "$@" || has_arg --no-build "$@"; then
         compose --resolve-local-image-tag "${subcommand}" "$@"
       else
-        compose --resolve-local-image-tag "${subcommand}" --no-build "$@"
+        compose --resolve-local-image-tag "${subcommand}" --build "$@"
       fi
     fi
     ;;
@@ -852,7 +852,7 @@ case "${subcommand}" in
     run_down "$@"
     ;;
   pull)
-    compose --resolve-remote-image-tag "${subcommand}" "$@"
+    compose --resolve-remote-image-tag "${subcommand}" --ignore-buildable "$@"
     ;;
   *)
     compose "${subcommand}" "$@"

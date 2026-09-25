@@ -357,11 +357,29 @@ concrete tag is defined once by the wrapper and forwarded through the vendored
 launcher to Compose. This lets Docker select the native platform image
 consistently on Linux and VM-backed macOS engines such as Colima. A revision can
 advance workstation content while retaining the same bundled Codex version.
-The LiteLLM sidecar is the unmodified upstream BerriAI
-`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest. It is the
-first published upstream image whose packaged model map includes GPT-6 Sol and
-Luna. No recipe fork or patch layer is used. Replace it with the first suitable
-stable release after the same gateway tests pass.
+The LiteLLM sidecar is built locally from the upstream BerriAI
+`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest, plus the
+small patch in `litellm/patch_chatgpt.py`. The build context contains only the
+Dockerfile and patch, so recipe credentials and workspace files are not sent
+to the builder. No separate image publication is needed.
+
+The patch fixes two independent behaviors in the ChatGPT Responses adapter:
+
+- Caller `instructions` pass through verbatim, including an empty string or an
+  absent field. Upstream prepends a built-in Codex prompt (and uses it even when
+  `CHATGPT_DEFAULT_INSTRUCTIONS` is empty), which can override the caller's
+  intended instructions.
+- `prompt_cache_key` survives the adapter's field filter. A nonempty string also
+  sets the upstream `session_id` header so requests with the same key retain
+  cache affinity; an empty or absent key leaves the generated session fallback.
+
+The build rejects unrecognized or partially patched adapter source and checks
+the installed adapter without provider calls. Update the patch and rerun the
+gateway tests before changing the upstream pin; advance the local image tag
+when changing the patch. Normal startup rebuilds this small layer as needed.
+`myCodex pull` pulls prebuilt services only; the gateway is rebuilt on the next
+`up`. An explicit `up --no-build` uses the existing local image.
+
 The CLI flag and every provider config disable LiteLLM telemetry, OpenTelemetry
 is disabled, and the feedback prompt is suppressed. The sidecar uses the model
 metadata packaged in that immutable release instead of fetching the mutable
@@ -422,12 +440,15 @@ Never remove or replace that file while existing containers are running.
 
 ## How It's Assembled
 
-The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstream
-[myCodex](https://github.com/emsi/myCodex) project. The top-level `myCodex`
+The launcher (`bin/myCodex` and `bin/lib/`) is vendored from the upstream
+[myCodex](https://github.com/emsi/myCodex) project, with recipe-specific defaults
+that build the gateway on startup and skip buildable services during `pull`.
+Explicit `--build` and `--no-build` options are preserved. The top-level `myCodex`
 wrapper manages provider selection and credentials and points the launcher at
 vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml`
 defines the two services, using a portable SemVer workstation image and a
-digest-pinned LiteLLM image; `vaka.yaml` defines the egress policy.
+locally patched LiteLLM image with a digest-pinned base; `vaka.yaml` defines the
+egress policy.
 
 > Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.
 
@@ -453,6 +474,9 @@ profile state and precedence, dispatch, the identical-agent-egress invariant,
 telemetry-destination denial, and credential handlers; `test_login.sh` covers sidecar scope, early log
 visibility, readiness diagnostics, timeouts, and process/service cleanup.
 `test_compose.py` renders every profile and pins the proxy privacy controls;
-`test_gateway_auth.sh` starts the pinned LiteLLM image with no network, rejects
-unexpected telemetry/metadata initialization, and exercises the auth policy.
-These tests require Docker.
+`test_launcher_build.py` checks build and pull dispatch with Docker mocked.
+`test_gateway_auth.sh` builds and starts the recipe LiteLLM image with no network,
+rejects unexpected telemetry/metadata initialization, and exercises the auth policy.
+`test_chatgpt_gateway.sh` tests caller instructions, cache affinity, patch
+idempotency and rejection of incompatible source, plus model/tool contracts
+against that image with networking disabled. These tests require Docker.

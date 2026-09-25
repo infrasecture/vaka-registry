@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the auth policy with the exact pinned LiteLLM image.
+# Exercise the auth policy with the recipe-built LiteLLM image.
 set -euo pipefail
 
 RECIPE_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,15 +7,15 @@ COMPOSE_FILE="${RECIPE_SOURCE}/docker-compose.yaml"
 AUTH_FILE="${RECIPE_SOURCE}/litellm_agent_auth.py"
 TEST_FILE="${RECIPE_SOURCE}/tests/test_gateway_auth.py"
 
-litellm_image="$(
-  sed -n 's/^[[:space:]]*image: \(docker\.litellm[^[:space:]]*\)$/\1/p' \
-    "${COMPOSE_FILE}"
-)"
-[[ -n "${litellm_image}" ]] \
-  || { echo "FAIL: could not resolve the pinned LiteLLM image" >&2; exit 1; }
+# Build exactly the gateway selected by this recipe, using its isolated context.
+docker compose -f "${COMPOSE_FILE}" build litellm
+litellm_image="$(docker compose -f "${COMPOSE_FILE}" config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["litellm"]["image"])')"
 
 docker_args=(
-  run --rm --entrypoint python
+  run --rm --network none --entrypoint python
+  -e LITELLM_LOCAL_MODEL_COST_MAP=True
+  -e OTEL_SDK_DISABLED=true
   -e MYCODEX_GATEWAY_TOKEN=mycodex-agent-v1
   -e LITELLM_MASTER_KEY=test-gateway-master
   --mount "type=bind,src=${AUTH_FILE},dst=/test/litellm_agent_auth.py,readonly"

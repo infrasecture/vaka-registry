@@ -7,7 +7,8 @@ from pathlib import Path
 import subprocess
 
 recipe_dir = Path(__file__).resolve().parent.parent
-EXPECTED_LITELLM_IMAGE = (
+EXPECTED_LITELLM_IMAGE = "vaka/litellm:1.104.0-dev.1-r1"
+EXPECTED_LITELLM_BASE = (
     "docker.litellm.ai/berriai/litellm:v1.104.0-dev.1@"
     "sha256:3def0387871a732a6d18b009576c4bf4313c54d448fa938a58f51cf189d1fa33"
 )
@@ -84,8 +85,16 @@ def assert_litellm_privacy_contract(compose, profile):
     if service.get("image") != EXPECTED_LITELLM_IMAGE:
         raise SystemExit(
             f"FAIL: {profile} LiteLLM image is {service.get('image')!r}, "
-            f"want audited upstream build {EXPECTED_LITELLM_IMAGE!r}"
+            f"want recipe-built gateway {EXPECTED_LITELLM_IMAGE!r}"
         )
+    build = service.get("build", {})
+    if build.get("context") != str(recipe_dir / "litellm"):
+        raise SystemExit(f"FAIL: {profile} gateway build context must contain only patch files")
+    if service.get("pull_policy") != "build":
+        raise SystemExit(f"FAIL: {profile} gateway must be built locally")
+    dockerfile = (recipe_dir / "litellm/Dockerfile").read_text()
+    if f"FROM {EXPECTED_LITELLM_BASE}\n" not in dockerfile:
+        raise SystemExit(f"FAIL: {profile} gateway base is not the audited upstream digest")
     command = service.get("command") or []
     try:
         telemetry_value = command[command.index("--telemetry") + 1]
