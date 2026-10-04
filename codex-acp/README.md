@@ -195,13 +195,13 @@ This keeps installation in the standard, cacheable image-build phase. Runtime
 does not need npm-registry egress and does not execute mutable **npx -y**
 resolution on every client launch.
 
-The LiteLLM sidecar is built locally from the upstream BerriAI
-`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest, plus the
-small patch in `litellm/patch_chatgpt.py`. The build context contains only the
-Dockerfile and patch, so recipe credentials and workspace files are not sent
-to the builder. No separate image publication is needed.
+The LiteLLM sidecar uses the published
+`ghcr.io/infrasecture/litellm:v1.105.0-rc.1` image from the
+[Infrasecture fork](https://github.com/infrasecture/litellm). This version-tagged
+pre-release supports amd64 and arm64. The recipe pulls it directly, without a
+local gateway build or patch script.
 
-The patch fixes two independent behaviors in the ChatGPT Responses adapter:
+The fork fixes two independent behaviors in the ChatGPT Responses adapter:
 
 - Caller `instructions` pass through verbatim, including an empty string or an
   absent field. Upstream prepends a built-in Codex prompt (and uses it even when
@@ -209,12 +209,12 @@ The patch fixes two independent behaviors in the ChatGPT Responses adapter:
   intended instructions.
 - `prompt_cache_key` survives the adapter's field filter. A nonempty string also
   sets the upstream `session_id` header so requests with the same key retain
-  cache affinity; an empty or absent key leaves the generated session fallback.
+  cache affinity; an empty or absent key leaves the existing session header.
 
-The build rejects unrecognized or partially patched adapter source and checks
-the installed adapter without provider calls. Update the patch and rerun the
-gateway tests before changing the upstream pin; advance the local image tag
-when changing the patch. Normal startup rebuilds this small layer as needed.
+The fork's publishing workflow tests the packaged proxy on both architectures
+before updating the image tag. Recipe tests check the selected image's adapter
+behavior and gateway authentication with networking disabled. Rerun these tests
+before changing the image version.
 
 The CLI and all provider configs disable LiteLLM telemetry.
 OpenTelemetry is disabled, the feedback prompt is suppressed, and the packaged

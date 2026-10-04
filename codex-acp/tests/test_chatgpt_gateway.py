@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Contract test for the pinned LiteLLM ChatGPT Responses adapter."""
+"""Contract test for the published LiteLLM fork's ChatGPT Responses adapter."""
 
 import importlib.metadata
-import inspect
 from itertools import product
 import sys
 
@@ -11,7 +10,6 @@ import yaml
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 from litellm.responses.utils import ResponsesAPIRequestUtils
 from litellm.types.router import GenericLiteLLMParams
-from patch_chatgpt import ALLOWED, INSTRUCTIONS, PRESERVE, WITH_CACHE, patch_source
 
 
 EXPECTED_EFFORTS = {
@@ -28,30 +26,6 @@ EXPECTED_EFFORTS = {
 
 def fail(message):
     raise SystemExit(f"FAIL: {message}")
-
-
-def check_source_patch():
-    # Use the installed adapter as the fixture so upstream source drift is visible.
-    patched = inspect.getsource(sys.modules[ChatGPTResponsesAPIConfig.__module__])
-    if patch_source(patched) != patched:
-        fail("source patch is not idempotent on the installed adapter")
-    original = patched.replace(PRESERVE, INSTRUCTIONS).replace(WITH_CACHE, ALLOWED)
-    if patch_source(original) != patched:
-        fail("source patch does not reproduce the installed adapter")
-    incompatible = (
-        original.replace('get_chatgpt_default_instructions()', 'changed_default()'),
-        original.replace('            "truncation",', '            "unknown_field",'),
-        original + INSTRUCTIONS,
-        original.replace(INSTRUCTIONS, PRESERVE),
-        original.replace(ALLOWED, WITH_CACHE),
-        patched.replace('            "prompt_cache_key",\n', ''),
-    )
-    for source in incompatible:
-        try:
-            patch_source(source)
-        except RuntimeError:
-            continue
-        fail("source patch accepted an incompatible or partial adapter")
 
 
 def check_instructions_and_cache(adapter):
@@ -87,13 +61,13 @@ def check_instructions_and_cache(adapter):
         if "reasoning.encrypted_content" not in outbound.get("include", []):
             fail(f"{model} encrypted reasoning inclusion changed")
         checked += 1
-    print(f"PASS: caller instructions and cache affinity ({checked} combinations); patch drift checks")
+    print(f"PASS: caller instructions and cache affinity ({checked} combinations)")
 
 
 def main():
     version = importlib.metadata.version("litellm")
-    if version != "1.104.0":
-        fail(f"LiteLLM version is {version}, expected audited pre-release 1.104.0")
+    if version != "1.105.0":
+        fail(f"LiteLLM version is {version}, expected fork package version 1.105.0")
 
     for model in ("gpt-6-sol", "gpt-6-luna"):
         info = litellm.get_model_info(model)
@@ -158,7 +132,6 @@ def main():
 
     litellm.drop_params = False
     adapter = ChatGPTResponsesAPIConfig()
-    check_source_patch()
     check_instructions_and_cache(adapter)
     checked = 0
     for model, efforts in EXPECTED_EFFORTS.items():
@@ -192,7 +165,7 @@ def main():
             checked += 1
 
     print(
-        f"PASS: pinned LiteLLM routes all {len(EXPECTED_EFFORTS)} ChatGPT models and preserves "
+        f"PASS: published LiteLLM fork routes all {len(EXPECTED_EFFORTS)} ChatGPT models and preserves "
         f"reasoning plus function/custom/web-search tools ({checked} combinations)"
     )
 

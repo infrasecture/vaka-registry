@@ -77,11 +77,8 @@ services:
       - ./codex-prestart.sh:/usr/local/bin/codex-prestart.sh:ro
 
   litellm:
-    # Build the narrow ChatGPT adapter fixes over the digest-pinned upstream.
-    image: vaka/litellm:1.104.0-dev.1-r1
-    build:
-      context: ./litellm
-    pull_policy: build
+    # Published fork with caller-instruction preservation and cache affinity.
+    image: ghcr.io/infrasecture/litellm:v1.105.0-rc.1
     init: true
     labels:
       agent.vaka.codex.gateway-auth: restricted-v1
@@ -94,7 +91,7 @@ services:
       NO_DOCS: "True"
       NO_REDOC: "True"
       LITELLM_DONT_SHOW_FEEDBACK_BOX: "true"
-      # Use the model metadata packaged in the pinned release. This prevents
+      # Use the model metadata packaged in the image. This prevents
       # LiteLLM's otherwise automatic startup fetch from GitHub.
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
       OTEL_SDK_DISABLED: "true"
