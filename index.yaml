@@ -1,8 +1,44 @@
 apiVersion: recipes.vaka/v1alpha1
 kind: RegistryIndex
-generated: '2026-09-25T11:37:44Z'
+generated: '2026-10-04T20:32:07Z'
 recipes:
   codex:
+  - version: 0.3.4
+    description: Codex agent in an egress-restricted container with a LiteLLM gateway
+      sidecar
+    tags:
+    - agent
+    - openai
+    - codex
+    - litellm
+    - chatgpt
+    created: '2026-10-04T20:32:07Z'
+    digest: sha256:f6b5158197e6c972c175d8be7fd7fdaec157f24d59ef30341557492a2a64812f
+    urls:
+    - https://github.com/infrasecture/vaka-registry/releases/download/codex-0.3.4/codex-0.3.4.tar.gz
+    minVakaVersion: 0.0.3
+    env:
+    - name: MYCODEX_AUTH
+      required: false
+      description: One-invocation auth-profile override for automation; interactive
+        first startup or myCodex login selects and persists chatgpt, openai, or vertex
+    - name: OPENAI_API_KEY
+      required: false
+      description: Model provider API key consumed only by LiteLLM in the openai profile;
+        myCodex also accepts OPENAI_API_KEY_FILE or prompts securely after that profile
+        is selected
+    - name: MYCODEX_MODEL
+      required: false
+      description: Optional model override passed to Codex; the OpenAI and ChatGPT
+        profiles default to gpt-6-sol, while experimental profiles may define another
+        default
+    policy:
+      defaultActions:
+        codex: reject
+        litellm: reject
+      riskFlags:
+      - codex:unpinned-image
+      - litellm:unpinned-image
   - version: 0.3.3
     description: Codex agent in an egress-restricted container with a LiteLLM gateway
       sidecar
@@ -137,34 +173,6 @@ recipes:
       description: Optional explicit model pin passed to Codex; the OpenAI and ChatGPT
         profiles otherwise leave selection to Codex, while experimental profiles may
         define their own default
-    - name: LITELLM_MASTER_KEY
-      required: false
-      description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE
-        or generates and persists one
-    policy:
-      defaultActions:
-        codex: reject
-        litellm: reject
-      riskFlags:
-      - codex:unpinned-image
-  - version: 0.2.4
-    description: Codex agent in an egress-restricted container with a LiteLLM gateway
-      sidecar
-    tags:
-    - agent
-    - openai
-    - codex
-    - litellm
-    created: '2026-08-04T20:41:07Z'
-    digest: sha256:064b6ee5ad2dcd0e4ad962712309397becff98b3530b53fa5434bedffacb092f
-    urls:
-    - https://github.com/infrasecture/vaka-registry/releases/download/codex-0.2.4/codex-0.2.4.tar.gz
-    minVakaVersion: 0.0.3
-    env:
-    - name: OPENAI_API_KEY
-      required: true
-      description: Model provider API key consumed only by LiteLLM; myCodex also accepts
-        OPENAI_API_KEY_FILE or prompts securely
     - name: LITELLM_MASTER_KEY
       required: false
       description: Optional embedded-gateway key override; myCodex also accepts LITELLM_MASTER_KEY_FILE
