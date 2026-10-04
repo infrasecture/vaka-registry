@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Contract test for the pinned LiteLLM ChatGPT Responses adapter."""
+"""Contract test for the published LiteLLM fork's ChatGPT Responses adapter."""
 
 import importlib.metadata
+from itertools import product
 import sys
 
 import litellm
@@ -27,10 +28,46 @@ def fail(message):
     raise SystemExit(f"FAIL: {message}")
 
 
+def check_instructions_and_cache(adapter):
+    absent = object()
+    checked = 0
+    for model, instructions, cache_key in product(
+        EXPECTED_EFFORTS,
+        ("Caller instructions.\nPreserve spacing. ", "", absent),
+        ("thread-one", "thread-one", "thread-two", "", absent),
+    ):
+        params = {}
+        if instructions is not absent:
+            params["instructions"] = instructions
+        if cache_key is not absent:
+            params["prompt_cache_key"] = cache_key
+        requested = ResponsesAPIRequestUtils.get_requested_response_api_optional_param(params)
+        mapped = ResponsesAPIRequestUtils.get_optional_params_responses_api(
+            f"chatgpt/{model}", adapter, requested
+        )
+        headers = {"session_id": "generated-fallback", "x-test": "unchanged"}
+        outbound = adapter.transform_responses_api_request(
+            f"chatgpt/{model}", "contract test", mapped, GenericLiteLLMParams(), headers
+        )
+        if outbound.get("instructions", absent) != instructions:
+            fail(f"{model} instructions changed, including empty/absent semantics")
+        if outbound.get("prompt_cache_key", absent) != cache_key:
+            fail(f"{model} prompt_cache_key changed or was dropped")
+        expected_session = cache_key if isinstance(cache_key, str) and cache_key else "generated-fallback"
+        if headers != {"session_id": expected_session, "x-test": "unchanged"}:
+            fail(f"{model} cache affinity or unrelated headers changed")
+        if outbound.get("store") is not False or outbound.get("stream") is not True:
+            fail(f"{model} upstream store/stream requirements changed")
+        if "reasoning.encrypted_content" not in outbound.get("include", []):
+            fail(f"{model} encrypted reasoning inclusion changed")
+        checked += 1
+    print(f"PASS: caller instructions and cache affinity ({checked} combinations)")
+
+
 def main():
     version = importlib.metadata.version("litellm")
-    if version != "1.104.0":
-        fail(f"LiteLLM version is {version}, expected audited pre-release 1.104.0")
+    if version != "1.105.0":
+        fail(f"LiteLLM version is {version}, expected fork package version 1.105.0")
 
     for model in ("gpt-6-sol", "gpt-6-luna"):
         info = litellm.get_model_info(model)
@@ -95,6 +132,7 @@ def main():
 
     litellm.drop_params = False
     adapter = ChatGPTResponsesAPIConfig()
+    check_instructions_and_cache(adapter)
     checked = 0
     for model, efforts in EXPECTED_EFFORTS.items():
         for effort in efforts:
@@ -127,7 +165,7 @@ def main():
             checked += 1
 
     print(
-        f"PASS: pinned LiteLLM routes all {len(EXPECTED_EFFORTS)} ChatGPT models and preserves "
+        f"PASS: published LiteLLM fork routes all {len(EXPECTED_EFFORTS)} ChatGPT models and preserves "
         f"reasoning plus function/custom/web-search tools ({checked} combinations)"
     )
 

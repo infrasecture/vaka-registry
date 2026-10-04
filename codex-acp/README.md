@@ -195,12 +195,28 @@ This keeps installation in the standard, cacheable image-build phase. Runtime
 does not need npm-registry egress and does not execute mutable **npx -y**
 resolution on every client launch.
 
-The LiteLLM sidecar is the unmodified upstream BerriAI
-`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest. It is the
-first published upstream image whose packaged model map includes GPT-6 Sol and
-Luna; there is no recipe fork or patch layer. Replace it with the first suitable
-stable release after the same gateway tests pass. The CLI and all provider
-configs disable LiteLLM telemetry,
+The LiteLLM sidecar uses the published
+`ghcr.io/infrasecture/litellm:v1.105.0-rc.1` image from the
+[Infrasecture fork](https://github.com/infrasecture/litellm). This version-tagged
+pre-release supports amd64 and arm64. The recipe pulls it directly, without a
+local gateway build or patch script.
+
+The fork fixes two independent behaviors in the ChatGPT Responses adapter:
+
+- Caller `instructions` pass through verbatim, including an empty string or an
+  absent field. Upstream prepends a built-in Codex prompt (and uses it even when
+  `CHATGPT_DEFAULT_INSTRUCTIONS` is empty), which can override the caller's
+  intended instructions.
+- `prompt_cache_key` survives the adapter's field filter. A nonempty string also
+  sets the upstream `session_id` header so requests with the same key retain
+  cache affinity; an empty or absent key leaves the existing session header.
+
+The fork's publishing workflow tests the packaged proxy on both architectures
+before updating the image tag. Recipe tests check the selected image's adapter
+behavior and gateway authentication with networking disabled. Rerun these tests
+before changing the image version.
+
+The CLI and all provider configs disable LiteLLM telemetry.
 OpenTelemetry is disabled, the feedback prompt is suppressed, and the packaged
 model map is used without a startup fetch. LiteLLM API, telemetry, and remote
 model-map destinations are excluded from every Vaka egress allowlist.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the auth policy with the exact pinned LiteLLM image.
+# Exercise the auth policy with the published LiteLLM image.
 set -euo pipefail
 
 RECIPE_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,15 +7,14 @@ COMPOSE_FILE="${RECIPE_SOURCE}/docker-compose.yaml"
 AUTH_FILE="${RECIPE_SOURCE}/litellm_agent_auth.py"
 TEST_FILE="${RECIPE_SOURCE}/tests/test_gateway_auth.py"
 
-litellm_image="$(
-  sed -n 's/^[[:space:]]*image: \(docker\.litellm[^[:space:]]*\)$/\1/p' \
-    "${COMPOSE_FILE}"
-)"
-[[ -n "${litellm_image}" ]] \
-  || { echo "FAIL: could not resolve the pinned LiteLLM image" >&2; exit 1; }
+litellm_image="$(docker compose -f "${COMPOSE_FILE}" config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["litellm"]["image"])')"
+docker pull "${litellm_image}"
 
 docker_args=(
-  run --rm --entrypoint python
+  run --rm --network none --entrypoint python
+  -e LITELLM_LOCAL_MODEL_COST_MAP=True
+  -e OTEL_SDK_DISABLED=true
   -e MYCODEX_GATEWAY_TOKEN=mycodex-agent-v1
   -e LITELLM_MASTER_KEY=test-gateway-master
   --mount "type=bind,src=${AUTH_FILE},dst=/test/litellm_agent_auth.py,readonly"
@@ -66,7 +65,7 @@ urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=2)
 done
 if (( ! ready )); then
   docker logs "${container}" >&2
-  echo "FAIL: pinned LiteLLM did not become ready with the auth policy" >&2
+  echo "FAIL: published LiteLLM did not become ready with the auth policy" >&2
   exit 1
 fi
 
@@ -74,7 +73,7 @@ startup_logs="$(docker logs "${container}" 2>&1)"
 if grep -Eiq 'api[.]litellm[.]ai|raw[.]githubusercontent[.]com|posthog|sentry' \
     <<< "${startup_logs}"; then
   echo "${startup_logs}" >&2
-  echo "FAIL: pinned LiteLLM attempted or initialized an external telemetry/metadata path" >&2
+  echo "FAIL: published LiteLLM attempted or initialized an external telemetry/metadata path" >&2
   exit 1
 fi
 
@@ -103,4 +102,4 @@ else:
     raise SystemExit("agent credential reached a LiteLLM management route")
 '
 
-echo "PASS: pinned LiteLLM starts offline and enforces the agent route boundary at runtime"
+echo "PASS: published LiteLLM starts offline and enforces the agent route boundary at runtime"

@@ -35,7 +35,7 @@ denied to it. The random LiteLLM administrator key is stored in protected recipe
 state and injected into only the sidecar, where trusted wrapper operations such
 as device login can use it.
 
-The recipe tests render every authentication profile and run the pinned LiteLLM
+The recipe tests render every authentication profile and run the published LiteLLM
 image to verify both halves of this contract: privileged variables are absent
 from Codex, and its marker receives HTTP 403 on gateway management routes.
 
@@ -298,7 +298,7 @@ The gateway uses LiteLLM's native ChatGPT Responses adapter. It preserves
 Codex's function tools, custom tools such as shell/apply-patch, and hosted
 `web_search` requests, including text-and-image search fields and requested
 search results. The profile does not enable LiteLLM's generic silent parameter
-dropping; the pinned adapter's tested request contract is enforced by the
+dropping; the selected adapter's tested request contract is enforced by the
 recipe test suite. Actual model and hosted-tool availability still depends on
 the signed-in ChatGPT account and provider policy.
 
@@ -357,14 +357,30 @@ concrete tag is defined once by the wrapper and forwarded through the vendored
 launcher to Compose. This lets Docker select the native platform image
 consistently on Linux and VM-backed macOS engines such as Colima. A revision can
 advance workstation content while retaining the same bundled Codex version.
-The LiteLLM sidecar is the unmodified upstream BerriAI
-`v1.104.0-dev.1` pre-release, pinned by its multi-architecture digest. It is the
-first published upstream image whose packaged model map includes GPT-6 Sol and
-Luna. No recipe fork or patch layer is used. Replace it with the first suitable
-stable release after the same gateway tests pass.
+The LiteLLM sidecar uses the published
+`ghcr.io/infrasecture/litellm:v1.105.0-rc.1` image from the
+[Infrasecture fork](https://github.com/infrasecture/litellm). This version-tagged
+pre-release supports amd64 and arm64. The recipe pulls it directly, without a
+local gateway build or patch script.
+
+The fork fixes two independent behaviors in the ChatGPT Responses adapter:
+
+- Caller `instructions` pass through verbatim, including an empty string or an
+  absent field. Upstream prepends a built-in Codex prompt (and uses it even when
+  `CHATGPT_DEFAULT_INSTRUCTIONS` is empty), which can override the caller's
+  intended instructions.
+- `prompt_cache_key` survives the adapter's field filter. A nonempty string also
+  sets the upstream `session_id` header so requests with the same key retain
+  cache affinity; an empty or absent key leaves the existing session header.
+
+The fork's publishing workflow tests the packaged proxy on both architectures
+before updating the image tag. Recipe tests check the selected image's adapter
+behavior and gateway authentication with networking disabled. Rerun these tests
+before changing the image version.
+
 The CLI flag and every provider config disable LiteLLM telemetry, OpenTelemetry
 is disabled, and the feedback prompt is suppressed. The sidecar uses the model
-metadata packaged in that immutable release instead of fetching the mutable
+metadata packaged in that image instead of fetching the mutable
 cost map from GitHub at startup. LiteLLM's own API and telemetry destinations
 are absent from every Vaka egress allowlist, so the network policy independently
 enforces that only configured model and authentication providers are reachable.
@@ -427,7 +443,7 @@ The launcher (`bin/myCodex` and `bin/lib/`) is vendored verbatim from the upstre
 wrapper manages provider selection and credentials and points the launcher at
 vaka (via `MYCODEX_COMPOSE`) for egress enforcement. `docker-compose.yaml`
 defines the two services, using a portable SemVer workstation image and a
-digest-pinned LiteLLM image; `vaka.yaml` defines the egress policy.
+published LiteLLM fork image; `vaka.yaml` defines the egress policy.
 
 > Upgrading from an older version of this recipe? It previously shipped a `compose.yaml`; the current layout uses `docker-compose.yaml`. `vaka get` removes the old file automatically unless you edited it, in which case it is kept and you can delete the leftover `compose.yaml` yourself.
 
@@ -453,6 +469,7 @@ profile state and precedence, dispatch, the identical-agent-egress invariant,
 telemetry-destination denial, and credential handlers; `test_login.sh` covers sidecar scope, early log
 visibility, readiness diagnostics, timeouts, and process/service cleanup.
 `test_compose.py` renders every profile and pins the proxy privacy controls;
-`test_gateway_auth.sh` starts the pinned LiteLLM image with no network, rejects
-unexpected telemetry/metadata initialization, and exercises the auth policy.
-These tests require Docker.
+`test_gateway_auth.sh` pulls and starts the published LiteLLM image with no network,
+rejects unexpected telemetry/metadata initialization, and exercises the auth policy.
+`test_chatgpt_gateway.sh` tests caller instructions, cache affinity, and model/tool contracts
+against that image with networking disabled. These tests require Docker.
