@@ -50,8 +50,8 @@ run_wrapper "${capture_one}" OPENAI_API_KEY=test-provider-key
 image_tag="$(<"${capture_one}.image-tag")"
 [[ "${image_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r[1-9][0-9]*$ ]] \
   || fail "wrapper image tag is not a revision-qualified release: ${image_tag}"
-[[ "${image_tag}" == "1.13.1-r1" ]] \
-  || fail "wrapper did not select the GPT-6-capable ACP runtime: ${image_tag}"
+[[ "${image_tag}" == "2.1.1-r1" ]] \
+  || fail "wrapper did not select the expected ACP image revision: ${image_tag}"
 
 secret_dir="${RECIPE}/.secrets"
 secret_file="${secret_dir}/litellm_admin_key_restricted_v1"
