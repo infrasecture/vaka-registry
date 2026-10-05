@@ -186,14 +186,18 @@ The recipe intentionally distributes a normal Dockerfile:
 - it builds on **ghcr.io/infrasecture/harness-workstation:0.160.0-r1**;
 - it copies Node **24.19.0** from the official semver-tagged Node image because
   current adapter dependencies require Node 20 or newer;
-- package.json pins **@agentclientprotocol/codex-acp** to **1.13.1**;
+- package.json pins **@agentclientprotocol/codex-acp** to **2.1.1**;
 - package-lock.json locks its graph, including the compatible
-  **@openai/codex 0.156.1** package shipped by the adapter;
+  **@openai/codex 0.159.3** package shipped by the adapter;
 - **npm ci --omit=dev** runs during image build.
 
-The local image **vaka/codex-acp:1.13.1-r2** uses the updated harness base;
-the adapter and its bundled Codex remain unchanged. ACP launches that bundled
-Codex, not the harness's Codex CLI.
+The local image **vaka/codex-acp:2.1.1-r1** upgrades the adapter and its bundled
+Codex separately from the harness base. ACP launches that bundled Codex, not
+the harness's Codex CLI. Adapter 2.1.1 declares **@openai/codex ^0.159.1**;
+the lockfile selects **0.159.3** within that range, without forcing **0.160.0**.
+The adapter still supports ACP protocol v1. Its 2.x upgrade changes tool-call
+reporting and access presets; see the
+[upstream changelog](https://github.com/agentclientprotocol/codex-acp/blob/v2.1.1/CHANGELOG.md).
 
 This keeps installation in the standard, cacheable image-build phase. Runtime
 does not need npm-registry egress and does not execute mutable **npx -y**
